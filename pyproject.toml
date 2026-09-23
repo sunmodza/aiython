@@ -8,8 +8,10 @@ dependencies = [
     "httpx>=0.28,<1",
     "jsonschema>=4,<5",
     "litellm>=1.102.1,<1.103",
+    "prompt-toolkit>=3.0.53,<4",
     "pydantic>=2.10,<3",
     "python-dotenv>=1,<2",
+    "tomlkit>=0.15,<1",
 ]
 
 [project.scripts]

@@ -462,7 +462,7 @@ class ToolAgent:
                     category = next((cls.__name__ for cls in categories if isinstance(exc, cls)), 'OtherError')
                     stats.tool_errors.append({'tool': call.name, 'error': category,
                                               'model_call': stats.model_calls})
-                detail = {"status": "error", "error": type(exc).__name__, "message": str(exc)}
+                detail: dict[str, object] = {"status": "error", "error": type(exc).__name__, "message": str(exc)}
                 if isinstance(exc, InvocationError):
                     detail["acceptance_unknown_or_submitted"] = exc.accepted
                 if call.name == "run_plan":
