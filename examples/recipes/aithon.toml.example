@@ -1,0 +1,3 @@
+version = 3
+model = "openrouter/YOUR_TOOL_CALLING_MODEL"
+api_key_env = "OPENROUTER_API_KEY"

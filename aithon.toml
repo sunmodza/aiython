@@ -1,0 +1,9 @@
+version = 3
+model = "openrouter/openai/gpt-6-luna"
+env_file = ".aithon/credentials.env"
+api_key_env = "OPENROUTER_API_KEY"
+
+# Optional capability routes:
+# [capabilities]
+# embedding = "openai/text-embedding-3-large"
+# vision = "gemini/gemini-2.5-flash"

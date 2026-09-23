@@ -1,0 +1,305 @@
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import Mock
+
+from aithon.agent import ToolAgent
+from aithon.cli import run_script
+from aithon.models import ProfileConfig, ResolvedConfig
+from aithon.type_constraints import TypeViolation, UnsupportedType, describe_output, validate_output
+
+
+class TypeSafetyTests(unittest.TestCase):
+    def run_source(self,source,agent=None):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'main.py'; path.write_text(source)
+            profile = ProfileConfig('default','fake','model')
+            config = ResolvedConfig(None,path.parent,'default',{'default':profile})
+            return run_script(path,config=config,agent_factory=lambda p:agent)
+
+    def test_assignment_reassignment_and_alias_mutation(self):
+        for source in ('x: int = "bad"', 'x: int = 1\nx = "bad"',
+                       'xs: list[int] = [1]\nalias = xs\nalias.append("bad")',
+                       'xs: dict[str, list[int]] = {"a":[1]}\nxs["a"].append("bad")'):
+            with self.subTest(source=source), self.assertRaises(TypeViolation): self.run_source(source)
+
+    def test_argument_return_and_implicit_return(self):
+        for source in ('def work(x: int):\n    return x\nwork("bad")',
+                       'def work() -> int:\n    return "bad"\nwork()',
+                       'def work() -> int:\n    pass\nwork()'):
+            with self.subTest(source=source), self.assertRaises(TypeViolation): self.run_source(source)
+
+    def test_shadowed_global_is_not_a_local_contract(self):
+        result = self.run_source('x: int = 1\ndef work():\n    x = "allowed"\n    return x\nanswer = work()')
+        self.assertEqual(result['answer'],'allowed')
+
+    def test_global_write_is_checked(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('x: int = 1\ndef work():\n    global x\n    x = "bad"\nwork()')
+
+    def test_class_attribute_checked_before_write(self):
+        result = self.run_source('''from aithon.type_constraints import TypeViolation
+class Person:
+    age: int
+    def __init__(self):
+        self.age = 10
+person = Person()
+try:
+    person.age = 'bad'
+except TypeViolation:
+    pass
+answer = person.age
+''')
+        self.assertEqual(result['answer'],10)
+
+    def test_parameter_variants_async_and_typevar(self):
+        self.assertEqual(self.run_source('''import asyncio
+from typing import TypeVar
+T = TypeVar('T')
+def identity(x: T) -> T:
+    return x
+async def work(x: int, /, *values: int, flag: bool = True, **extras: str) -> list[int]:
+    return [x, *values]
+answer = asyncio.run(work(identity(1),2,flag=True,name='ok'))
+''')['answer'],[1,2])
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from typing import TypeVar
+T = TypeVar('T')
+def broken(x: T) -> T:
+    return 'wrong'
+broken(1)
+''')
+
+    def test_forward_local_alias_is_captured(self):
+        self.assertEqual(self.run_source('''def factory():
+    type Number = int
+    def work(x: Number) -> Number:
+        return x
+    return work
+answer = factory()(3)
+''')['answer'],3)
+
+    def test_final_and_loop_bindings(self):
+        with self.assertRaises(TypeViolation): self.run_source('from typing import Final\nx: Final[int] = 1\nx = 2')
+        with self.assertRaises(TypeViolation): self.run_source('x: int = 1\nfor x in ["bad"]:\n    pass')
+
+    def test_recursive_alias_and_generic_alias(self):
+        namespace = {}
+        exec('type Tree = int | list[Tree]\ntype Box[T] = list[T]',namespace)
+        validate_output([1,[2]],'Tree',namespace)
+        validate_output([1,2],'Box[int]',namespace)
+        with self.assertRaises(TypeViolation): validate_output([1,['bad']],'Tree',namespace)
+
+    def test_typed_dict_schema_literals_and_descriptions(self):
+        namespace = {}
+        exec('''from typing import TypedDict, Literal, Annotated, NotRequired
+class TicketAnalysis(TypedDict):
+    severity: Literal['high','low']
+    summary: Annotated[str,'One short English sentence']
+    note: NotRequired[str]
+''',namespace)
+        schema = describe_output('TicketAnalysis',namespace)
+        self.assertEqual(schema['properties']['severity']['enum'],['high','low'])
+        self.assertEqual(schema['properties']['summary']['description'],'One short English sentence')
+        self.assertNotIn('note',schema['required'])
+        validate_output({'severity':'high','summary':'short'},'TicketAnalysis',namespace)
+        with self.assertRaisesRegex(TypeViolation,'severity'):
+            validate_output({'severity':'wrong','summary':'short'},'TicketAnalysis',namespace)
+
+    def test_future_typeddict_optional_fields(self):
+        namespace = {}
+        exec('''from __future__ import annotations
+from typing import TypedDict, NotRequired
+class Record(TypedDict):
+    value: int
+    note: NotRequired[str]
+''',namespace)
+        validate_output({'value':1},'Record',namespace)
+
+    def test_annotation_calls_never_execute(self):
+        touched = []
+        with self.assertRaises(UnsupportedType):
+            describe_output('danger()',{'danger':lambda:touched.append(1)})
+        self.assertEqual(touched,[])
+
+    def test_ai_gets_schema_from_return_annotation_and_repairs_before_return(self):
+        provider = Mock()
+        calls = [
+            [{'id':'e1','type':'function','function':{'name':'evaluate','arguments':json.dumps({'code':'{"severity":"wrong"}','result_id':'r'})}},
+             {'id':'f1','type':'function','function':{'name':'finish','arguments':json.dumps({'result_from':'r'})}}],
+            [{'id':'e2','type':'function','function':{'name':'evaluate','arguments':json.dumps({'code':'{"severity":"high"}','result_id':'r'})}},
+             {'id':'f2','type':'function','function':{'name':'finish','arguments':json.dumps({'result_from':'r'})}}]]
+        payloads = []
+        def complete(messages,tools):
+            payloads.append(json.loads(messages[1]['content']))
+            return {'role':'assistant','tool_calls':calls[len(payloads)-1]}
+        provider.complete.side_effect = complete
+        result = self.run_source('''from typing import TypedDict, Literal
+class Result(TypedDict):
+    severity: Literal['high','low']
+def analyze() -> Result:
+    return analyze this incident
+answer = analyze()
+''',ToolAgent(provider))
+        self.assertEqual(result['answer'],{'severity':'high'})
+        self.assertEqual(payloads[0]['output_schema']['properties']['severity']['enum'],['high','low'])
+        self.assertEqual(provider.complete.call_count,2)
+
+    def test_ai_exec_cannot_break_declared_binding(self):
+        class Agent:
+            def execute(self,request,runtime): runtime.exec('x = "bad"')
+        with self.assertRaises(TypeViolation):
+            self.run_source('x: int = 1\nchange x now',Agent())
+
+    def test_returned_closure_nonlocal_binding_is_checked(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''def factory():
+    x: int = 1
+    def change():
+        nonlocal x
+        x = 'bad'
+    return change
+factory()()
+''')
+
+    def test_generators_yield_send_return_and_async_generator(self):
+        self.assertEqual(self.run_source('''import asyncio
+from typing import Generator, AsyncIterator
+async def ag() -> AsyncIterator[int]:
+    yield 1
+async def consume():
+    return [item async for item in ag()]
+def gen() -> Generator[int, str, int]:
+    received = yield 1
+    return len(received)
+g = gen()
+first = next(g)
+try:
+    g.send('ok')
+except StopIteration as stop:
+    returned = stop.value
+answer = (first, returned, asyncio.run(consume()))
+''')['answer'],(1,2,[1]))
+        for source in ('from typing import Iterator\ndef gen() -> Iterator[int]:\n    yield "bad"\nnext(gen())',
+                       'from typing import Generator\ndef gen() -> Generator[int, str, None]:\n    yield 1\ng = gen()\nnext(g)\ng.send(2)'):
+            with self.assertRaises(TypeViolation): self.run_source(source)
+
+    def test_yield_from_forwards_send_and_return(self):
+        result = self.run_source('''from typing import Generator
+def child():
+    text = yield 1
+    return len(text)
+def parent() -> Generator[int, str, int]:
+    return (yield from child())
+g = parent()
+next(g)
+try:
+    g.send('ok')
+except StopIteration as stop:
+    answer = stop.value
+''')
+        self.assertEqual(result['answer'],2)
+
+    def test_generic_class_fields(self):
+        namespace = {}
+        exec('''from typing import Generic, TypeVar
+T = TypeVar('T')
+class Box(Generic[T]):
+    value: T
+    def __init__(self,value): self.value = value
+''',namespace)
+        validate_output(namespace['Box'](1),'Box[int]',namespace)
+        with self.assertRaises(TypeViolation): validate_output(namespace['Box']('bad'),'Box[int]',namespace)
+
+    def test_finally_cannot_invalidate_a_checked_return(self):
+        with self.assertRaisesRegex(TypeViolation,'return'):
+            self.run_source('''def work() -> list[int]:
+    result = [1]
+    try:
+        return result
+    finally:
+        result.append('bad')
+work()
+''')
+
+    def test_class_field_mutations_inside_untyped_containers(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Group:
+    values: list[int]
+    def __init__(self):
+        self.values = [1]
+groups = [Group()]
+groups[0].values.append('bad')
+''')
+
+    def test_dataclass_constructor_fields_checked_without_variable_annotation(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from dataclasses import dataclass
+@dataclass
+class Item:
+    count: int
+item = Item('bad')
+''')
+
+    def test_typed_natural_language_keeps_subscript_inside_statement(self):
+        from aithon.frontend import parse
+        unit = parse('analysis: TicketAnalysis = analyze the ticket from ticket["message"]\n','test.py')
+        block = next(iter(unit.blocks.values()))
+        self.assertEqual(block.output_type,'TicketAnalysis')
+        self.assertTrue(block.statement.endswith('ticket["message"]'))
+
+    def test_enum_types_and_enum_literals(self):
+        from enum import Enum
+        class Level(Enum):
+            HIGH = 'high'
+            LOW = 'low'
+        namespace = {'Level':Level}
+        validate_output(Level.HIGH,'Literal[Level.HIGH]',namespace)
+        with self.assertRaises(TypeViolation): validate_output(Level.LOW,'Literal[Level.HIGH]',namespace)
+        self.assertEqual(describe_output('Level',namespace)['enum'],['high','low'])
+        json.dumps(describe_output('Literal[Level.HIGH]',namespace))
+
+    def test_unsupported_contract_fails_before_model_call(self):
+        provider = Mock()
+        with self.assertRaises(UnsupportedType):
+            self.run_source('from typing import Callable\nanswer: Callable[[int], str] = choose a function',ToolAgent(provider))
+        provider.complete.assert_not_called()
+
+    def test_ai_expected_type_from_function_argument_and_generic_return(self):
+        class Agent:
+            def __init__(self): self.types = []
+            def execute(self,request,runtime):
+                self.types.append(describe_output(request.output_type,runtime.manager.types.namespace(runtime.frame)))
+                return 3
+        agent = Agent()
+        self.run_source('''from typing import TypeVar
+T = TypeVar('T')
+def consume(value: int):
+    return value
+def choose(value: T) -> T:
+    return choose a similar value
+answer = consume(choose a number)
+other = choose(1)
+''',agent)
+        self.assertEqual([schema['type'] for schema in agent.types],['integer','integer'])
+
+    def test_semicolon_after_natural_assignment_stays_python(self):
+        class Agent:
+            def execute(self,request,runtime): return 4
+        result = self.run_source('x: int = choose a number; answer = x + 1',Agent())
+        self.assertEqual(result['answer'],5)
+
+    def test_pep695_generic_class_and_function(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box[T]:
+    value: T
+    def __init__(self,value):
+        self.value = value
+box = Box[int]('wrong')
+''')
+        result = self.run_source('''def identity[T](value: T) -> T:
+    return value
+answer = identity(3)
+''')
+        self.assertEqual(result['answer'],3)

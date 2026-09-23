@@ -1,0 +1,16 @@
+version = 3
+model = "openrouter/YOUR_REASONING_MODEL"
+api_key_env = "OPENROUTER_API_KEY"
+
+# LiteLLM reads conventional provider environment variables, or use an inline
+# route with api_key_env to read a key from this project's env_file.
+[capabilities]
+vision = "gemini/YOUR_MULTIMODAL_MODEL"
+document_understanding = "gemini/YOUR_MULTIMODAL_MODEL"
+embedding = "gemini/YOUR_MULTIMODAL_EMBEDDING_MODEL"
+reranking = "cohere/YOUR_RERANK_MODEL"
+speech_to_text = "openai/YOUR_TRANSCRIPTION_MODEL"
+text_to_speech = "gemini/YOUR_TTS_MODEL"
+image_generation = "gemini/YOUR_IMAGE_MODEL"
+image_editing = "gemini/YOUR_IMAGE_MODEL"
+video = { understand = "gemini/YOUR_VIDEO_UNDERSTANDING_MODEL", generate = "gemini/YOUR_VEO_MODEL" }
