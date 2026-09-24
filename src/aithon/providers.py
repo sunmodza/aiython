@@ -53,7 +53,7 @@ def failure_reason(code: int | None) -> str:
     if code == 403:
         return "access denied; check API key permissions and model access"
     if code == 404:
-        return "model or endpoint was not found"
+        return "model or endpoint is unavailable"
     return "provider request failed"
 
 
@@ -105,6 +105,33 @@ class LiteLLMProvider:
                 record_request_bytes(len(json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False).encode()))
                 llm = sdk()
                 result = llm.completion(
+                    model=settings["model"], messages=messages, tools=tools,
+                    tool_choice=self.profile.tool_choice if tools else "auto",
+                    api_key=settings["api_key"], api_base=settings["api_base"],
+                    timeout=remaining(self.profile.timeout), max_retries=0, stream=False,
+                )
+                provider_request_progress(number, "response received")
+                return parse_completion(result, self.profile)
+            except (ConfigError, ProviderError):
+                raise
+            except Exception as exc:
+                code = getattr(exc, "status_code", None)
+                if code == 429 and index + 1 < len(routes):
+                    continue
+                response_error(self.profile, failure_reason(code), code=code)
+        raise ProviderError("No reasoning route succeeded")
+
+    async def acomplete(self, messages: list[dict], tools: list[dict]) -> dict:
+        routes = self.profile.routes.get("reasoning", [])
+        if not routes:
+            raise ConfigError("Reasoning model is not configured")
+        for index, route in enumerate(routes):
+            settings = route_settings(self.config, route)
+            number = provider_request_started(settings["model"])
+            try:
+                record_request_bytes(len(json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False).encode()))
+                llm = sdk()
+                result = await llm.acompletion(
                     model=settings["model"], messages=messages, tools=tools,
                     tool_choice=self.profile.tool_choice if tools else "auto",
                     api_key=settings["api_key"], api_base=settings["api_base"],

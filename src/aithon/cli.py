@@ -4,6 +4,7 @@ import argparse
 import importlib.abc
 import importlib.machinery
 import json
+import os
 import sys
 import tokenize
 import types
@@ -61,22 +62,29 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     code = runtime.prepare(unit, entry=True)
     module = types.ModuleType("__main__")
     module.__dict__.update({"__file__": str(path), "__package__": None,
-                            "__spec__": None, "__cached__": None, RUNTIME_NAME: runtime,
+                            "__spec__": None,
+                            "__cached__": None, RUNTIME_NAME: runtime,
                             "__builtins__": __builtins__})
     old_main = sys.modules.get("__main__")
     old_argv, old_path = sys.argv, sys.path[:]
+    old_spawn_entry = os.environ.get("AITHON_SPAWN_ENTRY")
     finder = ProjectFinder(runtime)
     try:
         sys.modules["__main__"] = module
         sys.argv = [str(path), *arguments]
         sys.path.insert(0, str(path.parent))
         sys.meta_path.insert(0, finder)
+        os.environ["AITHON_SPAWN_ENTRY"] = str(path)
         exec(code, module.__dict__)
         return module.__dict__
     finally:
         sys.argv = old_argv
         sys.path[:] = old_path
         sys.meta_path.remove(finder)
+        if old_spawn_entry is None:
+            os.environ.pop("AITHON_SPAWN_ENTRY", None)
+        else:
+            os.environ["AITHON_SPAWN_ENTRY"] = old_spawn_entry
         if old_main is not None:
             sys.modules["__main__"] = old_main
         else:

@@ -6,6 +6,8 @@ import linecache
 import math
 import re
 import symtable
+import sys
+import threading
 import types
 from dataclasses import dataclass
 from collections.abc import MutableMapping
@@ -67,6 +69,8 @@ class RuntimeBridge:
         self.handles: dict[str, Any] = {}
         self._identities: dict[int, str] = {}
         self.traceback = traceback
+        collaboration = sys.modules.get("aithon.collaboration")
+        self.participant = collaboration.current() if collaboration is not None else None
         code = frame.f_code
         global_names = manager.global_names.get((code.co_filename, code.co_firstlineno, code.co_name), set())
         self._namespace = FrameNamespace(frame, global_names)
@@ -345,10 +349,59 @@ class DynamicNames(ast.NodeTransformer):
         return node
 
 
+class AsyncCalls(ast.NodeTransformer):
+    """Await suspended AI calls in coroutines without changing Python scheduling."""
+
+    def __init__(self):
+        self.in_async = False
+
+    def _body(self, node, active):
+        previous = self.in_async
+        self.in_async = active
+        node.body = [self.visit(item) for item in node.body]
+        self.in_async = previous
+        return node
+
+    def visit_AsyncFunctionDef(self, node):
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        node.args.defaults = [self.visit(item) for item in node.args.defaults]
+        node.args.kw_defaults = [self.visit(item) if item else None for item in node.args.kw_defaults]
+        return self._body(node, True)
+
+    def visit_FunctionDef(self, node):
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        node.args.defaults = [self.visit(item) for item in node.args.defaults]
+        node.args.kw_defaults = [self.visit(item) if item else None for item in node.args.kw_defaults]
+        return self._body(node, False)
+
+    def visit_ClassDef(self, node):
+        node.decorator_list = [self.visit(item) for item in node.decorator_list]
+        node.bases = [self.visit(item) for item in node.bases]
+        node.keywords = [self.visit(item) for item in node.keywords]
+        return self._body(node, False)
+
+    def visit_Lambda(self, node):
+        previous = self.in_async
+        self.in_async = False
+        node.body = self.visit(node.body)
+        self.in_async = previous
+        return node
+
+    def visit_Call(self, node):
+        node = self.generic_visit(node)
+        if (self.in_async and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == RUNTIME_NAME and node.func.attr == "execute"):
+            node.func.attr = "aexecute"
+            return ast.copy_location(ast.Await(value=node), node)
+        return node
+
+
 class Runtime:
     error_type = BaseException
 
     def __init__(self, config: ResolvedConfig, *, agent_factory=None, stats=False, trace_plan=False):
+        self._lock = threading.RLock()
         self.config = config
         from .typed_runtime import TypeRuntime
         self.types = TypeRuntime()
@@ -394,6 +447,10 @@ class Runtime:
             (code.co_filename, 1, "<module>"), {"available": False, "filename": code.co_filename}))
 
     def prepare(self, unit: Unit, *, entry: bool = False):
+        with self._lock:
+            return self._prepare(unit, entry=entry)
+
+    def _prepare(self, unit: Unit, *, entry: bool = False):
         self.register(unit)
         self.blocks.update({key: (unit, block) for key, block in unit.blocks.items()})
         linecache.cache[unit.filename] = (len(unit.source), None, unit.source.splitlines(True), unit.filename)
@@ -415,6 +472,8 @@ class Runtime:
         if unit.blocks:
             tree = DynamicNames(unit).visit(tree)
         tree = TypedTransformer().visit(tree)
+        if unit.blocks and any(isinstance(node, ast.AsyncFunctionDef) for node in ast.walk(tree)):
+            tree = AsyncCalls().visit(tree)
         ast.fix_missing_locations(tree)
         if entry:
             body = []
@@ -484,13 +543,14 @@ class Runtime:
         if name is None or name not in self.config.profiles:
             raise ConfigError(f"AI execution requires a configured profile (selected: {name!r}); run 'aithon setup' in the project")
         profile = self.config.profiles[name]
-        if name not in self.agents:
-            if self.agent_factory:
-                self.agents[name] = self.agent_factory(profile)
-            else:
-                from .agent import ToolAgent
-                from .providers import load_provider
-                self.agents[name] = ToolAgent(load_provider(self.config, profile))
+        with self._lock:
+            if name not in self.agents:
+                if self.agent_factory:
+                    self.agents[name] = self.agent_factory(profile)
+                else:
+                    from .agent import ToolAgent
+                    from .providers import load_provider
+                    self.agents[name] = ToolAgent(load_provider(self.config, profile))
         prompts = ((profile.prompt,) if profile.prompt else ()) + context.prompts
         return profile, prompts, self.agents[name]
 
@@ -517,6 +577,25 @@ class Runtime:
             request.requires_result = block.expression
             bridge = RuntimeBridge(frame, self)
             value = agent.execute(request, bridge)
+            from .type_constraints import validate_output
+            validate_output(value, request.output_type, self.types.namespace(frame))
+            return value
+        finally:
+            del frame
+
+    async def aexecute(self, key: str):
+        unit, block = self.blocks[key]
+        frame = inspect.currentframe().f_back
+        try:
+            request, agent = self.request(block.statement, block.span, unit, frame,
+                                          unit.directives.at(block.span.line))
+            request.output_type = block.output_type
+            request.requires_result = block.expression
+            bridge = RuntimeBridge(frame, self)
+            if callable(getattr(agent, "aexecute", None)):
+                value = await agent.aexecute(request, bridge)
+            else:
+                value = agent.execute(request, bridge)
             from .type_constraints import validate_output
             validate_output(value, request.output_type, self.types.namespace(frame))
             return value

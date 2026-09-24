@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import sys
 import tomllib
@@ -21,6 +22,13 @@ MODELS = {
     "image_generation": "openai/YOUR_IMAGE_MODEL",
     "image_editing": "openai/YOUR_IMAGE_MODEL",
 }
+
+
+def setup_command(profile: ProfileConfig, capability: str) -> str:
+    command = f"aithon setup --capability {capability}"
+    if profile.name != "default":
+        command += f" --profile {shlex.quote(profile.name)}"
+    return command
 
 
 def example(profile: ProfileConfig, capability: str) -> str:
@@ -54,7 +62,8 @@ def append_missing_route_example(config: ResolvedConfig, profile: ProfileConfig,
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "a", encoding="utf-8") as file:
             file.write(("\n" if source and not source.endswith("\n") else "") + "\n" + example(profile, capability))
-        print(f"aithon: added commented {capability} route example to {path}", file=sys.stderr)
+        print(f"aithon: added commented {capability} route example to {path}; "
+              f"run '{setup_command(profile, capability)}' to configure it", file=sys.stderr)
         return path
     except (OSError, ValueError, TypeError, UnicodeError):
         return None

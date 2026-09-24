@@ -20,21 +20,27 @@ no brand marks. The video was assembled from the generated images with FFmpeg;
 the audio was synthesized from `meeting-transcript.md` using FFmpeg's Flite voices.
 All names, products, and policy details are fictional.
 
-To use a configured provider, run `aithon setup` at the repository root and add
-the routes from `aithon.toml.example` to the root configuration, replacing its
-placeholder model IDs. The sample scripts inherit that configuration. A local
-`aithon.toml` is optional and would need its own credential setup. Each script
-anchors bundled asset paths to its own file, so it works from either directory.
-The media example requires the version 3 speech, vision, image and video routes
-shown in that template.
-If a required route is missing, Aithon adds an inert, commented setup example to
-this project's `aithon.toml` and stops with the missing capability named.
+Run `aithon setup` from the repository root or this directory and choose
+**Configure capabilities**. Select the routes needed by a script; the menu lets
+you add several routes in one session and prompts for route-specific credentials.
+For example, `aithon setup --capability speech_to_text --model openai/whisper-1`
+adds a transcription route. `media.py` also needs text to speech, vision, image
+generation and editing, and video understanding and generation. Use the model IDs
+available to your provider account; the IDs in `aithon.toml.example` are examples.
+`video_generation.py` uses only the reasoning and video generation routes, so it
+is a smaller way to try OpenRouter video without running the full media pipeline.
+The sample scripts inherit the root configuration. A local `aithon.toml` is
+optional and would need its own credential setup. Each script anchors bundled
+asset paths to its own file, so it works from either directory. If a required
+route is missing, Aithon prints the matching `aithon setup --capability ...`
+command, adds an inert commented example to the project config, and stops.
 Static inspection needs no credentials:
 
 ```bash
 uv run aithon --explain examples/capabilities/documents.py
 uv run aithon --explain examples/capabilities/products.py
 uv run aithon --explain examples/capabilities/media.py
+uv run aithon --explain examples/capabilities/video_generation.py
 ```
 
 Running the scripts with AI can call paid providers. `media.py` requests several

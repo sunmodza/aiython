@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 import inspect
+import threading
 import weakref
 
 from .frontend import RUNTIME_NAME
@@ -27,9 +28,12 @@ class Scope:
 class TypeRuntime:
     def __init__(self):
         self.classes = weakref.WeakSet()
+        self._classes_lock = threading.Lock()
 
     def register_class(self, cls):
-        if isinstance(cls, type): self.classes.add(cls)
+        if isinstance(cls, type):
+            with self._classes_lock:
+                self.classes.add(cls)
         return cls
 
     @staticmethod
@@ -86,7 +90,9 @@ class TypeRuntime:
                 raise TypeViolation(f'{name}: Final binding cannot be reassigned')
             contract.validate(value,name,bindings=scope.bindings)
             if contract.marker == 'Final': scope.final_names.add(name)
-        if type(value) in self.classes:
+        with self._classes_lock:
+            registered = type(value) in self.classes
+        if registered:
             compile_contract(getattr(value,'__orig_class__',type(value)),self.namespace(frame)).validate(value,name)
         return value
 
@@ -112,7 +118,9 @@ class TypeRuntime:
         finally: del frame
 
     def check_frame(self,frame):
-        if self.classes:
+        with self._classes_lock:
+            classes = frozenset(self.classes)
+        if classes:
             seen = set()
             if frame.f_code.co_name == '__init__' and 'self' in frame.f_locals:
                 seen.add(id(frame.f_locals['self']))
@@ -120,7 +128,7 @@ class TypeRuntime:
                 if id(candidate) in seen: return
                 seen.add(id(candidate))
                 cls = type(candidate)
-                if cls in self.classes:
+                if cls in classes:
                     compile_contract(getattr(candidate,'__orig_class__',cls),self.namespace(frame)).validate(candidate,cls.__qualname__)
                     try: state = object.__getattribute__(candidate,'__dict__')
                     except AttributeError: state = {}

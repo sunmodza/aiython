@@ -20,6 +20,19 @@ uv run aithon setup --check --non-interactive
 
 The second command updates only the model and preserves comments, capability routes and profiles. `--provider` changes the service, `--set-key` securely prompts to replace a saved key in a terminal, and `--path` selects an exact config file. Noninteractive setup never asks for or accepts a key on the command line; set its environment variable instead. `--check` sends one tool-call probe with a 25-second timeout and does not save a failed change. Provider model catalogs are used only for the interactive search, with a five-second timeout and manual entry fallback.
 
+The setup menu also configures capability routes. Choose **Configure capabilities** and search for models for speech, vision, documents, embeddings, reranking, images, or video. Search matches words in model IDs and names, not scattered letters. OpenRouter suggestions use the catalog's input/output modalities (and tool support for the main model); image suggestions also require chat-compatible output because the pinned LiteLLM adapter uses chat completions. Gemini's reasoning and embedding suggestions use its advertised methods. OpenAI and custom catalogs do not provide comparable capability metadata, so their suggestions remain unfiltered. Exact model IDs can always be entered manually. You can add several routes without restarting setup. For scripts or CI, pass the capability and its model explicitly:
+
+```bash
+uv run aithon setup --capability speech_to_text --model openai/whisper-1 --non-interactive
+uv run aithon setup --capability video --understand-model openrouter/google/gemini-2.5-flash --generate-model openrouter/minimax/hailuo-3 --non-interactive
+uv run aithon setup --capability image_generation --profile fast --model openai/image-model --non-interactive
+```
+
+Each capability route stores its own `api_key_env`, so it can use a different provider and project-saved key from the main model. Video understanding and generation can use different models; when editing video, either model can be changed while keeping the other. `--check` is limited to the reasoning model because probing media capabilities may create billable artifacts or jobs. Running a capability example verifies its live provider route.
+
+OpenRouter video generation uses the official OpenRouter Python SDK for submit, status, and content. `aithon setup --capability video` can select video models from OpenRouter's dedicated catalog. Video job IDs are saved before polling, so `aithon jobs resume OPERATION_ID` can continue a pending job without submitting it again.
+OpenRouter accounts that enforce Zero Data Retention cannot submit video jobs because the provider must retain generated content temporarily. Aithon reports that policy block with a link to the account privacy setting instead of a misleading model-not-found error.
+
 The model must support tool calling. Aithon uses the [LiteLLM Python SDK](https://docs.litellm.ai/docs/) in process, with no proxy service. You can choose any model and provider supported by the installed LiteLLM version.
 
 ## Write a program
@@ -94,6 +107,8 @@ Every batch is validated before any tool executes. A terminal must be last; malf
 ## Capabilities and examples
 
 Configured capabilities include reasoning, vision, document understanding, embeddings, reranking, speech transcription and synthesis, image generation and editing, and video understanding and generation. Local text extraction, vector indexing, and semantic search use project storage. When a required route is missing, Aithon appends a commented version 3 configuration example to the project TOML and stops. See the [capability guide](docs/capabilities.md), [recipe examples](examples/recipes/README.md), and [sample assets](examples/capabilities/README.md).
+
+Parallel tasks can optionally exchange messages through a collaboration group. Python still schedules threads, coroutines, and processes. The [collaboration guide](docs/collaboration.md) and [parallel examples](examples/collaboration/parallel_demo.py) show the shared ticket API, process bootstrap, and optional A2A connection.
 
 `--stats` records per-invocation calls, tool counts, context bytes, provider and runtime timing, reported token usage, and redacted errors. Request bytes are an estimate of serialized model messages and tools, not exact wire bytes. See the [performance evaluation guide](docs/performance-evaluation.md) for the correctness and latency gate.
 

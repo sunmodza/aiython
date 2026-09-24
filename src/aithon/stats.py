@@ -3,6 +3,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 import json
 import sys
+import threading
 
 
 @dataclass
@@ -78,15 +79,19 @@ class Stats:
     def __init__(self, enabled=False):
         self.enabled = enabled
         self.invocations: list[InvocationStats] = []
+        self._lock = threading.Lock()
 
     def start(self, request, recovery):
         if not self.enabled:
             return None
         record = InvocationStats(request.span.filename, request.span.line,
                                  "recovery" if recovery else "syntax")
-        self.invocations.append(record)
+        with self._lock:
+            self.invocations.append(record)
         return record
 
     def report(self):
         if self.enabled:
-            print("aithon stats: " + json.dumps([asdict(s) for s in self.invocations]), file=sys.stderr)
+            with self._lock:
+                records = [asdict(s) for s in self.invocations]
+            print("aithon stats: " + json.dumps(records), file=sys.stderr)

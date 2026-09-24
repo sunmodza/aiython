@@ -32,7 +32,7 @@ class ConfigHintTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stderr(output):
             for _ in range(2):
-                with self.assertRaisesRegex(ConfigError, 'commented setup example'):
+                with self.assertRaisesRegex(ConfigError, 'aithon setup --capability speech_to_text'):
                     runtime.routes(profile, 'speech_to_text')
         updated = self.path.read_text()
         self.assertTrue(updated.startswith(original))
@@ -41,12 +41,13 @@ class ConfigHintTests(unittest.TestCase):
         self.assertIn('# speech_to_text = "openai/YOUR_TRANSCRIPTION_MODEL"', updated)
         self.assertEqual(tomllib.loads(updated)['model'], 'openai/test')
         self.assertEqual(output.getvalue().count('added commented'), 1)
+        self.assertIn('aithon setup --capability speech_to_text', output.getvalue())
 
     def test_profile_hint_uses_profile_table(self):
         self.path.write_text(self.path.read_text() + '[profiles.fast]\nmodel="openai/fast"\n')
         config = resolve(self.script)
         with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(ConfigError):
+            with self.assertRaisesRegex(ConfigError, 'aithon setup --capability image_generation --profile fast'):
                 CapabilityRuntime(config).routes(config.profiles['fast'], 'image_generation')
         self.assertIn('# [profiles."fast".capabilities]', self.path.read_text())
 
@@ -58,7 +59,7 @@ class ConfigHintTests(unittest.TestCase):
                 'outcome': {'kind': 'error', 'reason': 'No text_to_speech route is configured',
                             'missing_capability': 'text_to_speech'}})}}]}
         with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(ProviderError, 'commented setup example'):
+            with self.assertRaisesRegex(ProviderError, 'aithon setup --capability text_to_speech'):
                 run_script(self.script, config=config, agent_factory=lambda _: ToolAgent(provider))
         self.assertEqual(provider.complete.call_count, 1)
         self.assertIn('# text_to_speech = ', self.path.read_text())

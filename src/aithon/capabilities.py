@@ -372,21 +372,26 @@ class CapabilityRuntime:
             entries = [r for r in entries if r['provider'] == provider]
         if not entries:
             hint = self.suggest_missing_route(profile, capability)
-            suffix = f'; a commented setup example is in {hint}' if hint else ''
+            if hint:
+                from .config_hints import setup_command
+                suffix = f"; run '{setup_command(profile, capability)}' (commented example in {hint})"
+            else:
+                suffix = ''
             raise ConfigError(f'No route for capability {capability!r} in profile {profile.name!r}{suffix}')
         return entries
 
     def adapter(self, route, profile):
         name = route['provider']
         key = (profile.name, name)
-        if key not in self.adapters:
-            if name == '$local':
-                adapter = LocalProvider()
-            else:
-                from .capability_providers import make_adapter
-                adapter = make_adapter(self.config, profile, name)
-            self.adapters[key] = adapter
-        return self.adapters[key]
+        with self._lock:
+            if key not in self.adapters:
+                if name == '$local':
+                    adapter = LocalProvider()
+                else:
+                    from .capability_providers import make_adapter
+                    adapter = make_adapter(self.config, profile, name)
+                self.adapters[key] = adapter
+            return self.adapters[key]
 
     def resume_job(self, profile, identifier):
         self.require(profile, 'read_asset', 'network', 'generate_file', 'write_filesystem')

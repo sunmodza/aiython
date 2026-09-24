@@ -1,4 +1,4 @@
-"""Capability calls through LiteLLM's in-process Python SDK."""
+"""Capability calls through provider SDKs, loaded only when needed."""
 from __future__ import annotations
 
 import base64
@@ -8,6 +8,7 @@ import ipaddress
 import json
 import mimetypes
 from pathlib import Path
+import re
 import socket
 import time
 from urllib.parse import urlsplit
@@ -79,6 +80,23 @@ def download_image(url: str) -> bytes:
         raise InvocationError("Image download failed", accepted=True) from None
 
 
+def _openrouter_video_policy_error(exc: Exception) -> str | None:
+    """Translate structured account-policy exclusions without exposing response bodies."""
+    error = getattr(getattr(exc, "data", None), "error", None)
+    metadata = getattr(error, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    reasons = metadata.get("ineligibility_reasons")
+    if not isinstance(reasons, list):
+        return None
+    if any(isinstance(item, dict) and str(item.get("reason", "")).startswith("zdr-violation")
+           for item in reasons):
+        return ("OpenRouter video generation is blocked by Zero Data Retention (ZDR) settings. "
+                "Video jobs require temporary retention. Change the account privacy setting at "
+                "https://openrouter.ai/settings/privacy or choose another video provider")
+    return None
+
+
 class LiteLLMAdapter:
     version = "3"
 
@@ -99,11 +117,22 @@ class LiteLLMAdapter:
 
     def _call(self, method, model, **kwargs):
         settings = self._settings(model)
+        sdk_model, api_base = model, settings["api_base"]
+        if method in ("transcription", "speech") and model.startswith("openrouter/"):
+            # OpenRouter exposes OpenAI-compatible audio endpoints, but this
+            # LiteLLM release has no OpenRouter audio dispatcher. Keep the
+            # OpenRouter slug as the upstream model through LiteLLM's OpenAI path.
+            sdk_model = "openai/" + model.removeprefix("openrouter/")
+            api_base = api_base or "https://openrouter.ai/api/v1"
+            if method == "transcription":
+                # LiteLLM's Whisper fallback otherwise asks for verbose_json,
+                # which OpenRouter's transcription models can reject.
+                kwargs.setdefault("response_format", "json")
         number = provider_request_started(f"{method} {model}")
         try:
             fn = getattr(sdk(), method)
             timeout = 600 if method.startswith("video_") else remaining(self.profile.timeout)
-            result = fn(model=model, api_key=settings["api_key"], api_base=settings["api_base"],
+            result = fn(model=sdk_model, api_key=settings["api_key"], api_base=api_base,
                         timeout=timeout, max_retries=0, **kwargs)
             provider_request_progress(number, "response received")
             usage = result.get("usage") if isinstance(result, dict) else getattr(result, "usage", None)
@@ -115,8 +144,49 @@ class LiteLLMAdapter:
             raise
         except Exception as exc:
             code = getattr(exc, "status_code", None)
+            if type(exc).__name__ == "UnsupportedParamsError":
+                parameter = re.search(r"Setting `([A-Za-z_][A-Za-z0-9_]*)`", str(exc))
+                name = parameter.group(1) if parameter else "a request parameter"
+                raise ConfigError(f"LiteLLM does not support {name} for {method} with model {model}") from None
+            if isinstance(exc, ValueError) and "Unmapped provider passed" in str(exc):
+                raise InvocationError(f"LiteLLM does not support {method} for this model provider",
+                                      accepted=False) from None
             raise InvocationError(failure_reason(code) + (f" (HTTP {code})" if type(code) is int else ""),
-                                  retryable=code == 429, accepted=code != 429) from None
+                                  retryable=code == 429,
+                                  accepted=code not in (400, 401, 403, 404, 422, 429)) from None
+
+    def _openrouter_video(self, method, route_model, *, timeout=60, **kwargs):
+        from openrouter import OpenRouter
+
+        settings = self._settings(route_model)
+        number = provider_request_started(f"video_{method} {route_model}")
+        try:
+            with OpenRouter(api_key=settings["api_key"],
+                            server_url=settings["api_base"] or "https://openrouter.ai/api/v1",
+                            retry_config=None) as client:
+                operation = getattr(client.video_generation, method)
+                response = operation(retries=None, timeout_ms=int(max(1, timeout) * 1000), **kwargs)
+                if method == "get_video_content":
+                    try:
+                        result = (response.read(), response.headers.get("content-type", "video/mp4"))
+                    finally:
+                        response.close()
+                else:
+                    result = plain(response)
+            provider_request_progress(number, "response received")
+            return result
+        except InvocationError:
+            raise
+        except Exception as exc:
+            if method == "generate" and (policy_error := _openrouter_video_policy_error(exc)):
+                raise ConfigError(policy_error) from None
+            code = getattr(exc, "status_code", None)
+            if type(code) is not int:
+                response = getattr(exc, "raw_response", None) or getattr(exc, "http_res", None)
+                code = getattr(response, "status_code", None)
+            raise InvocationError(failure_reason(code) + (f" (HTTP {code})" if type(code) is int else ""),
+                                  retryable=code == 429,
+                                  accepted=code not in (400, 401, 402, 403, 404, 422, 429)) from None
 
     def _part(self, asset, model):
         if asset.mime_type.startswith("image/"):
@@ -192,27 +262,40 @@ class LiteLLMAdapter:
         provider = record["model"].partition("/")[0]
         deadline = time.monotonic() + 600
         while True:
-            number = provider_request_started(f"video_status {record['model']}")
             try:
-                result = sdk().video_status(identifier, custom_llm_provider=provider,
-                                            api_key=settings["api_key"],
-                                            api_base=settings["api_base"], max_retries=0,
-                                            timeout=min(60, max(1, deadline - time.monotonic())))
-                provider_request_progress(number, "response received")
+                if provider == "openrouter":
+                    result = self._openrouter_video("get_generation", record["model"], job_id=identifier,
+                                                    timeout=min(60, max(1, deadline - time.monotonic())))
+                else:
+                    number = provider_request_started(f"video_status {record['model']}")
+                    result = sdk().video_status(identifier, custom_llm_provider=provider,
+                                                api_key=settings["api_key"],
+                                                api_base=settings["api_base"], max_retries=0,
+                                                timeout=min(60, max(1, deadline - time.monotonic())))
+                    provider_request_progress(number, "response received")
                 status = plain(result).get("status")
+            except ConfigError:
+                raise
             except Exception:
                 raise InvocationError(f"Video job remains pending; resume operation {identifier}", accepted=True) from None
             if status in ("failed", "cancelled", "canceled"):
                 context.store.job(identifier, {**record, "status": status})
                 raise InvocationError(f"Video job {status}", accepted=True)
             if status in ("completed", "succeeded", "complete"):
-                number = provider_request_started(f"video_content {record['model']}")
                 try:
-                    data = sdk().video_content(identifier, custom_llm_provider=provider,
-                                               api_key=settings["api_key"],
-                                               api_base=settings["api_base"], max_retries=0, timeout=60)
-                    provider_request_progress(number, "response received")
-                    artifact = self.artifact(context, data, "video/mp4", Video)
+                    if provider == "openrouter":
+                        data, mime = self._openrouter_video("get_video_content", record["model"], job_id=identifier,
+                                                            timeout=min(60, max(1, deadline - time.monotonic())))
+                    else:
+                        number = provider_request_started(f"video_content {record['model']}")
+                        data = sdk().video_content(identifier, custom_llm_provider=provider,
+                                                   api_key=settings["api_key"],
+                                                   api_base=settings["api_base"], max_retries=0, timeout=60)
+                        provider_request_progress(number, "response received")
+                        mime = "video/mp4"
+                    artifact = self.artifact(context, data, mime, Video)
+                except ConfigError:
+                    raise
                 except Exception:
                     raise InvocationError(f"Video download failed; resume operation {identifier}", accepted=True) from None
                 context.store.job(identifier, {**record, "status": "complete", "artifact": str(artifact.path)})
@@ -257,9 +340,18 @@ class LiteLLMAdapter:
                 images = p.get("assets", [])
                 if len(images) > 1:
                     raise CapabilityError("Video generation accepts one starting image")
-                response = plain(self._call("video_generation", request.model, prompt=p["prompt"],
-                                            input_reference=images[0].path if images else None))
-                identifier = response["id"]
+                if request.model.startswith("openrouter/"):
+                    payload = {"model": request.model.removeprefix("openrouter/"), "prompt": p["prompt"]}
+                    if images:
+                        payload["frame_images"] = [{"type": "image_url", "frame_type": "first_frame",
+                                                    "image_url": {"url": data_uri(images[0])}}]
+                    response = self._openrouter_video("generate", request.model, **payload)
+                else:
+                    response = plain(self._call("video_generation", request.model, prompt=p["prompt"],
+                                                input_reference=images[0].path if images else None))
+                identifier = response.get("id")
+                if not isinstance(identifier, str) or not identifier:
+                    raise InvocationError("Video submission returned no job ID; acceptance is unknown", accepted=True)
                 context.store.job(identifier, {"status": "pending", "model": request.model,
                                                "provider": request.provider, "provider_url": self.api_base})
                 return CapabilityResult(self.wait_video(identifier, context))
@@ -281,13 +373,13 @@ class LiteLLMAdapter:
                 return CapabilityResult(self.artifact(context, data, mime, Audio))
             if cap in ("image_generation", "image_editing"):
                 if cap == "image_generation":
-                    response = self._call("image_generation", request.model, prompt=p["prompt"], response_format="b64_json")
+                    response = self._call("image_generation", request.model, prompt=p["prompt"])
                 else:
                     with ExitStack() as stack:
                         images = [stack.enter_context(asset.path.open("rb")) for asset in p["assets"]]
                         response = self._call("image_edit", request.model,
                                               image=images[0] if len(images) == 1 else images,
-                                              prompt=p["prompt"], response_format="b64_json")
+                                              prompt=p["prompt"])
                 row = plain(response)["data"][0]
                 data = base64.b64decode(row["b64_json"], validate=True) if row.get("b64_json") else download_image(row["url"])
                 return CapabilityResult(self.artifact(context, data, "image/png", Image))
@@ -312,7 +404,7 @@ class LiteLLMAdapter:
                     text.append({"text": chunk["text"], "source": f"{p['assets'][index].path}:page {page}"})
             return CapabilityResult(text, usage)
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-            raise InvocationError("Malformed LiteLLM capability response", accepted=True) from None
+            raise InvocationError("Malformed capability response", accepted=True) from None
 
 
 def make_adapter(config, profile, name):

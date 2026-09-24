@@ -10,10 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+from prompt_toolkit.completion import CompleteEvent
+from prompt_toolkit.document import Document
 
-from aithon.config import credential, resolve
+from aithon.config import CAPABILITIES, credential, resolve
 from aithon.models import ConfigError
-from aithon.setup import _catalog, _choose_model, setup
+from aithon.setup import ModelChoice, _catalog, _choose_model, setup
 
 
 class CLITests(unittest.TestCase):
@@ -180,18 +182,85 @@ class CLITests(unittest.TestCase):
         response.json.return_value = {"data": [{"id": "openai/model-a"}, {"id": "vendor/model-b"}]}
         with patch("aithon.setup.httpx.get", return_value=response) as request:
             models = _catalog("openrouter", "", None)
-        self.assertEqual(models, ["openrouter/openai/model-a", "openrouter/vendor/model-b"])
+        self.assertEqual([choice.id for choice in models],
+                         ["openrouter/openai/model-a", "openrouter/vendor/model-b"])
         self.assertEqual(request.call_args.kwargs["timeout"], 5)
+        self.assertEqual(request.call_args.kwargs["params"], {"output_modalities": "all"})
         with patch("aithon.setup.httpx.get", side_effect=httpx.ConnectError("offline")):
             self.assertEqual(_catalog("openrouter", "", None), [])
 
-    def test_setup_model_picker_offers_fuzzy_completion_and_manual_ids(self):
-        with patch("aithon.setup._catalog", return_value=["openrouter/vendor/model"]), \
+    def test_setup_openrouter_catalog_filters_each_capability_by_metadata(self):
+        response = unittest.mock.Mock()
+        response.json.return_value = {"data": [
+            {"id": "openai/gpt-transcribe", "name": "GPT Transcribe",
+             "architecture": {"input_modalities": ["audio"], "output_modalities": ["transcription"]}},
+            {"id": "cohere/rerank", "architecture": {"input_modalities": ["text"],
+                                                   "output_modalities": ["rerank"]}},
+            {"id": "openai/embed", "architecture": {"input_modalities": ["text"],
+                                                   "output_modalities": ["embeddings"]}},
+            {"id": "vendor/chat", "architecture": {"input_modalities": ["text", "image"],
+                                                     "output_modalities": ["text"]},
+             "supported_parameters": ["tools"]},
+            {"id": "vendor/no-tools", "architecture": {"input_modalities": ["text"],
+                                                         "output_modalities": ["text"]},
+             "supported_parameters": ["temperature"]},
+            {"id": "vendor/video", "architecture": {"input_modalities": ["text"],
+                                                      "output_modalities": ["video"]}},
+            {"id": "vendor/chat-image", "architecture": {"input_modalities": ["text", "image"],
+                                                           "output_modalities": ["image", "text"]},
+             "supported_parameters": ["temperature"]},
+            {"id": "vendor/image-only", "architecture": {"input_modalities": ["text", "image"],
+                                                           "output_modalities": ["image"]}},
+        ]}
+        expected = {"reasoning": ["vendor/chat"], "speech_to_text": ["openai/gpt-transcribe"],
+                    "reranking": ["cohere/rerank"], "embedding": ["openai/embed"],
+                    "vision": ["vendor/chat", "vendor/chat-image"], "image_generation": ["vendor/chat-image"],
+                    "image_editing": ["vendor/chat-image"]}
+        with patch("aithon.setup.httpx.get", return_value=response):
+            for capability, names in expected.items():
+                with self.subTest(capability=capability):
+                    self.assertEqual([choice.id.removeprefix("openrouter/") for choice in
+                                      _catalog("openrouter", "", None, capability=capability)], names)
+        video_response = unittest.mock.Mock()
+        video_response.json.return_value = {"data": [{"id": "vendor/video", "name": "Video"}]}
+        with patch("aithon.setup.httpx.get", return_value=video_response) as request:
+            self.assertEqual([choice.id for choice in _catalog("openrouter", "", None,
+                                                                capability="video", mode="generate")],
+                             ["openrouter/vendor/video"])
+        self.assertEqual(str(request.call_args.args[0]), "https://openrouter.ai/api/v1/videos/models")
+
+    def test_setup_gemini_catalog_uses_supported_methods_when_available(self):
+        response = unittest.mock.Mock()
+        response.json.return_value = {"models": [
+            {"name": "models/text-model", "displayName": "Text Model",
+             "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/embed-model", "displayName": "Embed Model",
+             "supportedGenerationMethods": ["embedContent"]},
+        ]}
+        with patch("aithon.setup.httpx.get", return_value=response):
+            self.assertEqual([choice.id for choice in _catalog("gemini", "", "test-key")],
+                             ["gemini/text-model"])
+            self.assertEqual([choice.id for choice in _catalog("gemini", "", "test-key", capability="embedding")],
+                             ["gemini/embed-model"])
+
+    def test_setup_model_picker_matches_words_and_accepts_manual_ids(self):
+        choices = [ModelChoice("openrouter/openai/gpt-transcribe", "GPT Transcribe"),
+                   ModelChoice("openrouter/qwen/qwen3-30b-a3b-instruct-2507", "Qwen Instruct"),
+                   ModelChoice("openrouter/vendor/voice-model", "Speech Transcriber")]
+        with patch("aithon.setup._catalog", return_value=choices), \
                 patch("prompt_toolkit.prompt", return_value="openrouter/custom/preview") as prompt, \
                 contextlib.redirect_stdout(io.StringIO()):
-            selected = _choose_model("openrouter", "openrouter/old", "", None)
+            selected = _choose_model("openrouter", "openrouter/old", "", None,
+                                     capability="speech_to_text")
         self.assertEqual(selected, "openrouter/custom/preview")
-        self.assertEqual(type(prompt.call_args.kwargs["completer"]).__name__, "FuzzyWordCompleter")
+        completer = prompt.call_args.kwargs["completer"]
+        def matches(query):
+            return [item.text for item in completer.get_completions(Document(query), CompleteEvent())]
+        self.assertEqual(matches("transc"), ["openrouter/openai/gpt-transcribe",
+                                             "openrouter/vendor/voice-model"])
+        self.assertEqual(matches("QWEN 30b"), ["openrouter/qwen/qwen3-30b-a3b-instruct-2507"])
+        self.assertEqual(matches("zzunknown"), [])
+        self.assertEqual(prompt.call_args.kwargs["placeholder"], "openrouter/old")
 
     def test_setup_check_uses_one_tool_call_and_never_writes_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -229,6 +298,170 @@ class CLITests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, "Missing credential OPENROUTER_API_KEY"):
                     setup(["--check", "--path", str(path), "--non-interactive"])
             sdk.assert_not_called()
+
+    def test_setup_configures_every_non_video_capability_with_its_own_credential(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\n'
+                            'api_key_env="OPENROUTER_API_KEY"\n\n'
+                            '# >>> Aithon missing route: profile="default" capability=speech_to_text\n'
+                            '# Add this line to [capabilities], creating the section if necessary:\n'
+                            '# [capabilities]\n# speech_to_text = "openai/YOUR_TRANSCRIPTION_MODEL"\n'
+                            '# Replace the placeholder with a LiteLLM model ID and configure its credential.\n'
+                            '# <<< Aithon missing route\n')
+            for capability in sorted(CAPABILITIES - {"reasoning", "video"}):
+                with patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+                    setup(["--capability", capability, "--model", "openai/example-model",
+                           "--path", str(path), "--non-interactive"])
+            config = resolve(path.parent / "main.py")
+            for capability in CAPABILITIES - {"reasoning", "video"}:
+                route = config.profiles["default"].routes[capability][0]
+                self.assertEqual(route["model"], "openai/example-model")
+                self.assertEqual(config.providers[route["provider"]]["api_key_env"], "OPENAI_API_KEY")
+            self.assertEqual(config.profiles["default"].model, "openrouter/tool-model")
+            self.assertNotIn("# >>> Aithon missing route: profile=", path.read_text())
+
+    def test_setup_video_modes_can_be_configured_and_changed_independently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\napi_key_env="OPENROUTER_API_KEY"\n')
+            with patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+                setup(["--capability", "video", "--understand-model", "gemini/understand",
+                       "--generate-model", "gemini/generate", "--path", str(path), "--non-interactive"])
+                setup(["--capability", "video", "--generate-model", "gemini/generate-v2",
+                       "--path", str(path), "--non-interactive"])
+            config = resolve(path.parent / "main.py")
+            routes = config.profiles["default"].routes["video"]
+            self.assertEqual([(route["modes"], route["model"]) for route in routes],
+                             [(["understand"], "gemini/understand"), (["generate"], "gemini/generate-v2")])
+            self.assertTrue(all(config.providers[route["provider"]]["api_key_env"] == "GEMINI_API_KEY"
+                                for route in routes))
+
+    def test_setup_video_picker_filters_each_mode_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\napi_key_env="OPENROUTER_API_KEY"\n')
+            with patch("sys.stdin.isatty", return_value=True), \
+                    patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "GEMINI_API_KEY": "test-key"}), \
+                    patch("aithon.setup._choice", side_effect=["openrouter", "gemini"]), \
+                    patch("aithon.setup._choose_model", side_effect=["openrouter/understand", "gemini/generate"]) as chooser, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                setup(["--capability", "video", "--path", str(path)])
+            self.assertEqual([(call.kwargs["capability"], call.kwargs["mode"])
+                              for call in chooser.call_args_list],
+                             [("video", "understand"), ("video", "generate")])
+
+    def test_setup_saves_openrouter_video_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            source = 'version=3\nmodel="openrouter/tool-model"\napi_key_env="OPENROUTER_API_KEY"\n'
+            path.write_text(source)
+            with patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+                setup(["--capability", "video", "--understand-model", "openrouter/google/gemini-2.5-flash",
+                       "--generate-model", "openrouter/minimax/hailuo-3", "--path", str(path),
+                       "--non-interactive"])
+            self.assertIn('openrouter/minimax/hailuo-3', path.read_text())
+
+    def test_setup_capability_uses_named_profile_and_saves_key_privately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\napi_key_env="OPENROUTER_API_KEY"\n'
+                            'env_file=".aithon/credentials.env"\n\n[profiles.fast]\nmodel="openai/fast"\n')
+            folder = path.parent / ".aithon"
+            folder.mkdir()
+            (folder / "credentials.env").write_text('OPENROUTER_API_KEY="router-key"\n')
+            with patch("sys.stdin.isatty", return_value=True), patch("getpass.getpass", return_value="openai-key"), \
+                    patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(io.StringIO()):
+                setup(["--capability", "speech_to_text", "--profile", "fast", "--model", "openai/whisper-1",
+                       "--path", str(path)])
+                config = resolve(path.parent / "main.py")
+                route = config.profiles["fast"].routes["speech_to_text"][0]
+                self.assertEqual(config.providers[route["provider"]]["api_key_env"], "OPENAI_API_KEY")
+                self.assertEqual(config.secrets["OPENAI_API_KEY"], "openai-key")
+                self.assertEqual(config.secrets["OPENROUTER_API_KEY"], "router-key")
+            self.assertNotIn("openai-key", path.read_text())
+            self.assertEqual((folder / "credentials.env").stat().st_mode & 0o777, 0o600)
+
+    def test_setup_capability_key_rotation_keeps_model_without_catalog_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\n'
+                            '[capabilities]\nspeech_to_text={model="openai/whisper-1",'
+                            'api_key_env="OPENAI_API_KEY"}\n')
+            with patch("sys.stdin.isatty", return_value=True), patch("getpass.getpass", return_value="new-key"), \
+                    patch("aithon.setup._choose_model") as chooser, patch("aithon.setup._choice") as choice, \
+                    patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(io.StringIO()):
+                setup(["--capability", "speech_to_text", "--set-key", "--path", str(path)])
+            chooser.assert_not_called()
+            choice.assert_not_called()
+            config = resolve(path.parent / "main.py")
+            self.assertEqual(config.profiles["default"].routes["speech_to_text"][0]["model"],
+                             "openai/whisper-1")
+            self.assertEqual(config.secrets["OPENAI_API_KEY"], "new-key")
+
+    def test_setup_capability_keeps_revision_and_does_not_collapse_fallbacks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\n'
+                            '[capabilities]\nspeech_to_text={model="openai/whisper-1",'
+                            'api_key_env="OPENAI_API_KEY",revision="pinned"}\n')
+            with patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+                setup(["--capability", "speech_to_text", "--api-key-env", "SECOND_OPENAI_KEY",
+                       "--path", str(path), "--non-interactive"])
+            self.assertIn('revision = "pinned"', path.read_text())
+            path.write_text('version=3\nmodel="openrouter/tool-model"\n'
+                            '[capabilities]\nspeech_to_text=["openai/first","openai/second"]\n')
+            original = path.read_bytes()
+            with patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ConfigError, "fallback routes"):
+                    setup(["--capability", "speech_to_text", "--api-key-env", "SECOND_OPENAI_KEY",
+                           "--path", str(path), "--non-interactive"])
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_setup_capability_menu_allows_multiple_routes_without_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\napi_key_env="OPENROUTER_API_KEY"\n')
+            with patch("pathlib.Path.cwd", return_value=path.parent), patch("sys.stdin.isatty", return_value=True), \
+                    patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}), \
+                    patch("aithon.setup._choice", side_effect=["capability", "speech_to_text", "openrouter",
+                                                               "embedding", "openrouter", "done"]), \
+                    patch("aithon.setup._choose_model", side_effect=["openrouter/transcribe", "openrouter/embed"]) as chooser, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                setup([])
+            routes = resolve(path.parent / "main.py").profiles["default"].routes
+            self.assertIn("speech_to_text", routes)
+            self.assertIn("embedding", routes)
+            self.assertEqual([call.kwargs["capability"] for call in chooser.call_args_list],
+                             ["speech_to_text", "embedding"])
+
+    def test_setup_suggests_missing_route_from_runtime_hint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\n'
+                            '\n# >>> Aithon missing route: profile="default" capability=speech_to_text\n'
+                            '# <<< Aithon missing route\n')
+            output = io.StringIO()
+            with patch("pathlib.Path.cwd", return_value=path.parent), patch("sys.stdin.isatty", return_value=True), \
+                    patch("aithon.setup._choice", return_value="done") as choice, \
+                    contextlib.redirect_stdout(output):
+                setup([])
+            self.assertIn("Suggested next: configure speech_to_text", output.getvalue())
+            self.assertEqual(choice.call_args.kwargs["default"], "capability")
+
+    def test_setup_video_missing_mode_and_check_rejection_leave_config_intact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "aithon.toml"
+            path.write_text('version=3\nmodel="openrouter/tool-model"\n')
+            original = path.read_bytes()
+            with patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(ConfigError):
+                    setup(["--capability", "video", "--generate-model", "gemini/generate",
+                           "--path", str(path), "--non-interactive"])
+                with self.assertRaisesRegex(ConfigError, "reasoning model only"):
+                    setup(["--capability", "speech_to_text", "--model", "openai/whisper-1", "--check",
+                           "--path", str(path), "--non-interactive"])
+            self.assertEqual(path.read_bytes(), original)
 
     def test_stats_on_stderr_preserves_program_stdout(self):
         with tempfile.TemporaryDirectory() as directory:

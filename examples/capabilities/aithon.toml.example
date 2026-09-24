@@ -13,4 +13,4 @@ speech_to_text = "openai/YOUR_TRANSCRIPTION_MODEL"
 text_to_speech = "gemini/YOUR_TTS_MODEL"
 image_generation = "gemini/YOUR_IMAGE_MODEL"
 image_editing = "gemini/YOUR_IMAGE_MODEL"
-video = { understand = "gemini/YOUR_VIDEO_UNDERSTANDING_MODEL", generate = "gemini/YOUR_VEO_MODEL" }
+video = { understand = "gemini/YOUR_VIDEO_UNDERSTANDING_MODEL", generate = "openrouter/YOUR_VIDEO_GENERATION_MODEL" }

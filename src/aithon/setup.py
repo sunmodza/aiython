@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import getpass
 import json
 import os
@@ -16,7 +17,7 @@ import httpx
 import tomlkit
 from pydantic import ValidationError
 
-from .config import ProjectSettings, discover, read_env, resolve
+from .config import CAPABILITIES, ProjectSettings, discover, read_env, resolve
 from .models import ConfigError
 
 
@@ -28,16 +29,44 @@ PROVIDERS = {
     "other": ("", None),
 }
 DEFAULT_ENV_FILE = ".aithon/credentials.env"
+SETUP_CAPABILITIES = tuple(sorted(CAPABILITIES - {"reasoning"}))
+
+
+@dataclass(frozen=True)
+class ModelChoice:
+    id: str
+    name: str = ""
+
+
+# OpenRouter publishes these input/output modalities for each model. A missing
+# field means the catalog cannot establish compatibility, so keep manual entry.
+OPENROUTER_MODALITIES = {
+    ("reasoning", None): ("text", "text"),
+    ("vision", None): ("image", "text"),
+    ("document_understanding", None): ("file", "text"),
+    ("embedding", None): ("text", "embeddings"),
+    ("reranking", None): ("text", "rerank"),
+    ("speech_to_text", None): ("audio", "transcription"),
+    ("text_to_speech", None): ("text", "speech"),
+    ("image_generation", None): ("text", "image"),
+    ("image_editing", None): ("image", "image"),
+    ("video", "understand"): ("video", "text"),
+    ("video", "generate"): ("text", "video"),
+}
 
 
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="aithon setup", description="Create or update a project aithon.toml")
     command.add_argument("--provider", choices=PROVIDERS, help="Model service")
     command.add_argument("--model", help="Model ID; other settings are retained")
+    command.add_argument("--capability", choices=SETUP_CAPABILITIES, help="Configure a capability route")
+    command.add_argument("--profile", help="Profile whose capability route is configured (default: default)")
+    command.add_argument("--understand-model", help="Video understanding model ID")
+    command.add_argument("--generate-model", help="Video generation model ID")
     command.add_argument("--base-url", help="API base URL for a custom service")
     command.add_argument("--api-key-env", help="Environment variable that contains the API key")
     command.add_argument("--set-key", action="store_true", help="Securely prompt to save or replace the API key")
-    command.add_argument("--check", action="store_true", help="Test the model with one billable tool call")
+    command.add_argument("--check", action="store_true", help="Test the reasoning model with one billable tool call")
     command.add_argument("--path", type=Path, help="Exact project aithon.toml path")
     command.add_argument("--non-interactive", action="store_true", help="Use flags only; never prompt")
     return command
@@ -112,46 +141,107 @@ def _model_id(provider: str, value: str) -> str:
     return prefix + "/" + value if prefix and not value.startswith(prefix + "/") else value
 
 
-def _catalog(provider: str, base_url: str, key: str | None) -> list[str]:
-    """List models for setup only; failure never prevents manual model entry."""
+def _catalog_matches(provider: str, item: dict, capability: str, mode: str | None) -> bool:
+    if provider == "openrouter":
+        wanted = OPENROUTER_MODALITIES.get((capability, mode))
+        if wanted is None:
+            return True
+        architecture = item.get("architecture")
+        if not isinstance(architecture, dict):
+            return True  # Older or incomplete catalogs cannot prove incompatibility.
+        inputs = architecture.get("input_modalities")
+        outputs = architecture.get("output_modalities")
+        if isinstance(inputs, list) and wanted[0] not in inputs:
+            return False
+        if isinstance(outputs, list) and wanted[1] not in outputs:
+            return False
+        if capability in ("image_generation", "image_editing") and isinstance(outputs, list) and "text" not in outputs:
+            # The pinned LiteLLM OpenRouter image adapter uses chat completions.
+            # Image-only models require OpenRouter's dedicated image endpoint.
+            return False
+        parameters = item.get("supported_parameters")
+        if capability == "reasoning" and isinstance(parameters, list) and "tools" not in parameters:
+            return False
+    elif provider == "gemini":
+        methods = item.get("supportedGenerationMethods")
+        if isinstance(methods, list):
+            method = "embedContent" if capability == "embedding" else "generateContent" if capability == "reasoning" else None
+            if method and method not in methods:
+                return False
+    return True
+
+
+def _catalog(provider: str, base_url: str, key: str | None, *,
+             capability: str = "reasoning", mode: str | None = None) -> list[ModelChoice]:
+    """List plausible models for this route; failure never prevents manual entry."""
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     if provider == "openrouter":
-        url = "https://openrouter.ai/api/v1/models"
+        if capability == "video" and mode == "generate":
+            url = "https://openrouter.ai/api/v1/videos/models"
+            params = None
+        else:
+            url = "https://openrouter.ai/api/v1/models"
+            params = {"output_modalities": "all"}
     elif provider == "openai" and key:
         url = "https://api.openai.com/v1/models"
+        params = None
     elif provider == "gemini" and key:
         url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
         headers = {"x-goog-api-key": key}
+        params = None
     elif provider == "custom" and base_url:
         url = base_url.rstrip("/") + "/models"
+        params = None
     else:
         return []
     try:
-        response = httpx.get(url, headers=headers, timeout=5, follow_redirects=False)
+        response = httpx.get(url, headers=headers, params=params, timeout=5, follow_redirects=False)
         response.raise_for_status()
         payload = response.json()
         entries = payload.get("models" if provider == "gemini" else "data", [])
-        names = []
+        choices = {}
         for item in entries:
             if not isinstance(item, dict) or not isinstance(item.get("id") or item.get("name"), str):
                 continue
-            if provider == "gemini" and "generateContent" not in item.get("supportedGenerationMethods", []):
+            if not _catalog_matches(provider, item, capability, mode):
                 continue
-            name = item.get("id") or item["name"].removeprefix("models/")
-            names.append(_model_id(provider, name))
-        return sorted(set(names))
+            model = item.get("id") or item["name"].removeprefix("models/")
+            model_id = _model_id(provider, model)
+            display_name = item.get("displayName") if provider == "gemini" else item.get("name")
+            choices[model_id] = ModelChoice(model_id, display_name if isinstance(display_name, str) else "")
+        return sorted(choices.values(), key=lambda choice: choice.id)
     except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError):
         return []
 
 
-def _choose_model(provider: str, current: str, base_url: str, key: str | None) -> str:
-    names = _catalog(provider, base_url, key)
-    if names:
+def _search_words(value: str) -> list[str]:
+    return [word for word in re.split(r"[\s/._:-]+", value.casefold()) if word]
+
+
+def _model_matches(choice: ModelChoice, query: str) -> bool:
+    words = _search_words(choice.id + " " + choice.name)
+    return all(any(word.startswith(term) for word in words) for term in _search_words(query))
+
+
+def _choose_model(provider: str, current: str, base_url: str, key: str | None, *,
+                  capability: str = "reasoning", mode: str | None = None) -> str:
+    choices = _catalog(provider, base_url, key, capability=capability, mode=mode)
+    if choices:
         from prompt_toolkit import prompt
-        from prompt_toolkit.completion import FuzzyWordCompleter
-        print(f"Search {len(names)} available models. Type to filter; Tab selects a suggestion. Exact IDs also work.")
+        from prompt_toolkit.completion import Completer, Completion
+
+        class ModelCompleter(Completer):
+            def get_completions(self, document, complete_event):
+                query = document.text_before_cursor.strip()
+                for choice in choices:
+                    if _model_matches(choice, query):
+                        yield Completion(choice.id, start_position=-len(document.text_before_cursor),
+                                         display_meta=choice.name)
+
+        label = capability.replace("_", " ") + (f" ({mode})" if mode else "")
+        print(f"Search {len(choices)} {label} models. Match words in the ID or name; Tab selects a suggestion. Exact IDs also work.")
         try:
-            answer = prompt("Model ID: ", completer=FuzzyWordCompleter(names, WORD=True),
+            answer = prompt("Model ID: ", completer=ModelCompleter(),
                             complete_while_typing=True, placeholder=current or None).strip()
         except EOFError:
             raise ConfigError("Model ID is required; use --model MODEL_ID") from None
@@ -195,7 +285,7 @@ def _ignore_credentials(root: Path, relative_path: str) -> None:
         raise ConfigError(f"Cannot update .gitignore ({type(exc).__name__})") from None
 
 
-def _write_key(root: Path, relative_path: str, name: str, key: str) -> None:
+def _write_keys(root: Path, relative_path: str, updates: dict[str, str]) -> None:
     target = root / relative_path
     if not target.resolve().is_relative_to(root.resolve()) or target.is_symlink():
         raise ConfigError("Cannot save an API key outside the project or through a symlink")
@@ -207,7 +297,7 @@ def _write_key(root: Path, relative_path: str, name: str, key: str) -> None:
     if target.exists() and not target.is_file():
         raise ConfigError("Credential path is not a file")
     values = read_env(target) if target.exists() else {}
-    values[name] = key
+    values.update(updates)
     try:
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         _ignore_credentials(root, relative_path)
@@ -223,6 +313,10 @@ def _write_key(root: Path, relative_path: str, name: str, key: str) -> None:
                 os.unlink(temp_name)
     except OSError as exc:
         raise ConfigError(f"Cannot save API key ({type(exc).__name__})") from None
+
+
+def _write_key(root: Path, relative_path: str, name: str, key: str) -> None:
+    _write_keys(root, relative_path, {name: key})
 
 
 def _validated_content(document) -> str:
@@ -282,11 +376,208 @@ def _check_model(model: str, base_url: str, key_env: str, key: str | None) -> No
     print("Connection and tool calling verified.")
 
 
+def _route_fields(value) -> tuple[str, str, str]:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, str):
+        return value, "", ""
+    if isinstance(value, dict):
+        return value.get("model", ""), value.get("api_base", ""), value.get("api_key_env", "")
+    return "", "", ""
+
+
+def _capability_entry(document, profile: str, capability: str):
+    raw = tomllib.loads(tomlkit.dumps(document))
+    base = raw.get("capabilities", {})
+    if profile == "default":
+        return base.get(capability)
+    override = raw.get("profiles", {}).get(profile, {}).get("capabilities", {})
+    return override.get(capability, base.get(capability))
+
+
+def _capability_section(document, profile: str):
+    if profile == "default":
+        parent = document
+    else:
+        parent = document["profiles"][profile]
+    if "capabilities" not in parent:
+        parent["capabilities"] = tomlkit.table()
+    return parent["capabilities"]
+
+
+def _strip_missing_hint(content: str, profile: str, capability: str) -> str:
+    marker = f"# >>> Aithon missing route: profile={json.dumps(profile)} capability={capability}"
+    start = content.find(marker)
+    if start < 0:
+        return content
+    end = content.find("# <<< Aithon missing route", start)
+    if end < 0:
+        return content
+    line_end = content.find("\n", end)
+    return content[:start] + content[(line_end + 1) if line_end >= 0 else len(content):]
+
+
+def _missing_hints(document) -> list[tuple[str, str]]:
+    found = []
+    marker = "# >>> Aithon missing route: profile="
+    for line in tomlkit.dumps(document).splitlines():
+        if not line.startswith(marker):
+            continue
+        profile_text, separator, capability = line[len(marker):].partition(" capability=")
+        if not separator or capability not in SETUP_CAPABILITIES:
+            continue
+        try:
+            profile = json.loads(profile_text)
+        except ValueError:
+            continue
+        if isinstance(profile, str) and not _capability_entry(document, profile, capability):
+            found.append((profile, capability))
+    return found
+
+
+def _select_capability_route(args, path: Path, document, profile_config, current, label: str,
+                             specified_model: str | None, interactive: bool, new_keys: dict[str, str],
+                             preferred_provider: str | None = None, *, capability: str,
+                             mode: str | None = None):
+    current_model, current_base, current_env = _route_fields(current)
+    main_provider = _provider(profile_config.model, profile_config.base_url)
+    old_provider = _provider(current_model, current_base) if current_model else (preferred_provider or main_provider)
+    selected = args.provider or old_provider
+    if specified_model and not args.provider and not current_base:
+        prefix = specified_model.split("/", 1)[0]
+        if prefix in ("openrouter", "openai", "gemini"):
+            selected = prefix
+        elif not current_model and "/" in specified_model:
+            selected = "other"
+    keep_model = bool(current_model and specified_model is None and
+                      (args.set_key or args.api_key_env is not None or args.base_url is not None))
+    if interactive and specified_model is None and not args.provider and not keep_model:
+        selected = _choice(f"{label} provider", [(name, name.title()) for name in PROVIDERS],
+                           default=selected if selected in PROVIDERS else "gemini")
+    changed = selected != old_provider
+    base_url = args.base_url if args.base_url is not None else (current_base if not changed else "")
+    if selected == "custom" and not base_url:
+        base_url = profile_config.base_url if main_provider == "custom" else ""
+    if selected == "custom" and not base_url and interactive:
+        base_url = _ask(f"{label} API base URL")
+    if selected == "custom" and not base_url:
+        raise ConfigError(f"{label} custom provider requires --base-url")
+    if base_url and not _valid_url(base_url):
+        raise ConfigError("API base URL must be HTTP(S) without credentials, query or fragment")
+    key_env = args.api_key_env if args.api_key_env is not None else (
+        current_env if current_env and not changed else PROVIDERS[selected][1])
+    competing_names = {name for provider, (_, name) in PROVIDERS.items()
+                       if provider != selected and name}
+    if (args.api_key_env is None and not current_env and selected == main_provider and not changed
+            and profile_config.api_key_env and profile_config.api_key_env not in competing_names):
+        key_env = profile_config.api_key_env
+    if key_env is None and interactive and selected in ("custom", "other"):
+        key_env = _ask(f"{label} API key environment variable (blank for none)")
+    key_env = key_env or ""
+    if key_env and not _valid_name(key_env):
+        raise ConfigError("API key environment variable must be a valid name")
+    if selected in ("openrouter", "openai", "gemini") and not key_env:
+        raise ConfigError(f"{selected} requires an API key environment variable")
+    if args.set_key and not key_env:
+        raise ConfigError("--set-key requires an API key environment variable")
+    if interactive and key_env and key_env not in new_keys and (args.set_key or not _current_key(path, document, key_env)):
+        entered = getpass.getpass(f"{label} API key (blank to keep current or set it later): ").strip()
+        if entered:
+            new_keys[key_env] = entered
+    if specified_model is not None:
+        model = _model_id(selected, specified_model)
+    elif keep_model:
+        model = current_model
+    elif interactive:
+        model = _model_id(selected, _choose_model(selected, current_model if not changed else "",
+                                                   base_url, _effective_key(path, document, key_env,
+                                                                            new_keys.get(key_env, "")),
+                                                   capability=capability, mode=mode))
+    elif current_model and not changed:
+        model = current_model
+    else:
+        raise ConfigError(f"{label} model is required; pass its model option")
+    route = tomlkit.inline_table()
+    route["model"] = model
+    if base_url:
+        route["api_base"] = base_url
+    if key_env:
+        route["api_key_env"] = key_env
+    if isinstance(current, dict) and model == current_model and current.get("revision"):
+        route["revision"] = current["revision"]
+    return route
+
+
+def _configure_capability(args, path: Path, document, capability: str, profile: str,
+                          interactive: bool) -> Path:
+    if not path.exists():
+        raise ConfigError("Create the main project configuration with 'aithon setup' before adding capabilities")
+    if args.check:
+        raise ConfigError("--check tests the reasoning model only; capability routes are not tested automatically")
+    if capability != "video" and (args.understand_model or args.generate_model):
+        raise ConfigError("--understand-model and --generate-model require --capability video")
+    if capability == "video" and args.model:
+        raise ConfigError("Video requires --understand-model and --generate-model, not --model")
+    config = resolve(path.parent / "main.py", config_path=str(path))
+    if profile not in config.profiles:
+        raise ConfigError(f"Profile {profile!r} is not configured")
+    current = _capability_entry(document, profile, capability)
+    if isinstance(current, list) and not (args.model or args.understand_model or args.generate_model):
+        raise ConfigError("This capability has fallback routes; pass a model to replace them or edit TOML directly")
+    new_keys: dict[str, str] = {}
+    if capability == "video":
+        previous = current if isinstance(current, dict) and "model" not in current else {}
+        choices = {}
+        preferred_provider = None
+        for mode, specified in (("understand", args.understand_model), ("generate", args.generate_model)):
+            old = previous.get(mode)
+            other_specified = args.generate_model if mode == "understand" else args.understand_model
+            if specified is None and other_specified is not None and old is not None:
+                choices[mode] = old
+                if mode == "understand":
+                    old_model, old_base, _ = _route_fields(old)
+                    preferred_provider = _provider(old_model, old_base)
+                continue
+            choices[mode] = _select_capability_route(
+                args, path, document, config.profiles[profile], old, f"Video {mode}", specified,
+                interactive, new_keys, preferred_provider, capability=capability, mode=mode)
+            if mode == "understand":
+                preferred_provider = _provider(str(choices[mode]["model"]),
+                                               str(choices[mode].get("api_base", "")))
+        route = tomlkit.inline_table()
+        for mode, choice in choices.items():
+            route[mode] = choice
+    else:
+        route = _select_capability_route(args, path, document, config.profiles[profile], current,
+                                         capability.replace("_", " ").title(), args.model, interactive, new_keys,
+                                         capability=capability)
+    if args.set_key and not new_keys:
+        print("API key was not changed.")
+        return path
+    section = _capability_section(document, profile)
+    section[capability] = route
+    if new_keys and not document.get("env_file"):
+        document["env_file"] = DEFAULT_ENV_FILE
+    content = _strip_missing_hint(_validated_content(document), profile, capability)
+    if new_keys:
+        _write_keys(path.parent, str(document["env_file"]), new_keys)
+    _write_config(path, content, existing=True)
+    print(f"Updated {path}: {profile}.{capability}")
+    for name in new_keys:
+        if name in os.environ:
+            print(f"{name} in the process environment takes precedence over the saved key.")
+    return path
+
+
 def setup(argv: list[str]) -> Path:
     args = parser().parse_args(argv)
     path = _path(args)
     existing = path.exists()
     interactive = not args.non_interactive and sys.stdin.isatty()
+    if args.profile and not args.capability:
+        raise ConfigError("--profile requires --capability")
+    if (args.understand_model or args.generate_model) and args.capability != "video":
+        raise ConfigError("Video model options require --capability video")
     changes = any((args.provider, args.model, args.base_url, args.api_key_env is not None, args.set_key))
     wizard = interactive and not changes and not args.check
     if args.set_key and not interactive:
@@ -301,6 +592,11 @@ def setup(argv: list[str]) -> Path:
         document = tomlkit.parse('version = 3\nmodel = ""\n\n# Optional capability routes:\n'
                                  '# [capabilities]\n# embedding = "openai/text-embedding-3-large"\n'
                                  '# vision = "gemini/gemini-2.5-flash"\n')
+    if args.capability:
+        try:
+            return _configure_capability(args, path, document, args.capability, args.profile or "default", interactive)
+        except (EOFError, KeyboardInterrupt):
+            raise ConfigError("Setup cancelled; no changes saved") from None
     old_model = _model(document)
     old_base = _route_value(document, "api_base")
     old_provider = _provider(old_model, old_base)
@@ -318,13 +614,17 @@ def setup(argv: list[str]) -> Path:
     if existing and wizard:
         configured = bool(_current_key(path, document, old_env))
         source = "environment" if old_env in os.environ else "project file"
+        hints = _missing_hints(document)
         print(f"Config: {path}\nProvider: {old_provider}\nModel: {old_model}\n"
               f"API key: {'configured (' + source + ')' if configured else 'missing'}")
+        if hints:
+            print(f"Suggested next: configure {hints[0][1]} for profile {hints[0][0]}")
         try:
             action = _choice("What would you like to do?", [
                 ("model", "Search or change model"), ("provider", "Change provider"),
-                ("key", "Update API key"), ("check", "Test connection"), ("done", "Done")],
-                default="model")
+                ("capability", "Configure capabilities"), ("key", "Update API key"),
+                ("check", "Test connection"), ("done", "Done")],
+                default="capability" if hints else "model")
         except (EOFError, KeyboardInterrupt):
             raise ConfigError("Setup cancelled; no changes saved") from None
         if action == "done":
@@ -332,6 +632,23 @@ def setup(argv: list[str]) -> Path:
         if action == "check":
             _check_model(old_model, old_base, old_env, _current_key(path, document, old_env))
             return path
+        if action == "capability":
+            profiles = list(resolve(path.parent / "main.py", config_path=str(path)).profiles)
+            hinted_profile = next((name for name, _ in hints if name in profiles), "default")
+            profile = (_choice("Profile", [(name, name) for name in profiles], default=hinted_profile)
+                       if len(profiles) > 1 else "default")
+            while True:
+                hinted = [cap for hint_profile, cap in _missing_hints(document) if hint_profile == profile]
+                ordered = [*hinted, *(name for name in SETUP_CAPABILITIES if name not in hinted)]
+                options = [(name, f"{name.replace('_', ' ').title()} "
+                            f"[{'suggested' if name in hinted else 'configured' if _capability_entry(document, profile, name) else 'not configured'}]")
+                           for name in ordered]
+                capability = _choice("Capability", [*options, ("done", "Done")],
+                                     default=hinted[0] if hinted else None)
+                if capability == "done":
+                    return path
+                _configure_capability(args, path, document, capability, profile, interactive=True)
+                document = tomlkit.parse(path.read_text(encoding="utf-8"))
         if action == "key":
             args.set_key = True
     elif existing and not changes and not args.check:

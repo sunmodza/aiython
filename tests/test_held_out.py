@@ -15,7 +15,7 @@ from aithon.models import ProfileConfig, ResolvedConfig
 
 
 class HeldOutPrograms(unittest.TestCase):
-    def test_ordinary_fibonacci_never_imports_litellm(self):
+    def test_ordinary_fibonacci_never_imports_provider_sdks(self):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / 'plain.py'
             script.write_text('''import sys
@@ -24,6 +24,7 @@ for _ in range(32):
     left, right = right, left + right
 assert left == 2178309
 assert "litellm" not in sys.modules
+assert "openrouter" not in sys.modules
 print(left)
 ''')
             result = subprocess.run([sys.executable, '-m', 'aithon', str(script)],
