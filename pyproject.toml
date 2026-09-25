@@ -1,9 +1,21 @@
 [project]
-name = "aithon"
+name = "aiython"
 version = "0.1.0"
-description = "Python with live-runtime AI execution, recovery, and project profiles"
-readme = "README.md"
-requires-python = ">=3.14"
+description = "Run Python normally and invoke AI at the current statement"
+readme = "README.pypi.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["ai", "python", "runtime", "llm", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Interpreters",
+]
 dependencies = [
     "httpx>=0.28,<1",
     "jsonschema>=4,<5",
@@ -13,10 +25,11 @@ dependencies = [
     "pydantic>=2.10,<3",
     "python-dotenv>=1,<2",
     "tomlkit>=0.15,<1",
+    "typing-extensions>=4.15,<5",
 ]
 
 [project.scripts]
-aithon = "aithon:main"
+aiython = "aiython:main"
 
 [project.optional-dependencies]
 a2a = [
@@ -26,3 +39,6 @@ a2a = [
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "aiython"

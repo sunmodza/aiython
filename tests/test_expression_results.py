@@ -8,10 +8,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from aithon.agent import ToolAgent
-from aithon.capabilities import CapabilityPermissionError
-from aithon.cli import run_script
-from aithon.models import ProfileConfig, ProviderError, ResolvedConfig
+from aiython.agent import ToolAgent
+from aiython.capabilities import CapabilityPermissionError
+from aiython.cli import run_script
+from aiython.models import ProfileConfig, ProviderError, ResolvedConfig
 
 
 def call(identifier, name, **arguments):
@@ -256,3 +256,42 @@ print("The area of the circle is:", area)
         self.assertEqual(self.run_source("items = []\nappend one to items please", provider)["items"], [1])
         payload = json.loads(provider.complete.call_args.args[0][1]["content"])
         self.assertFalse(payload["requires_result"])
+
+    def test_basic_demo_executes_entire_block_and_preserves_bindings(self):
+        path = Path(__file__).resolve().parents[1] / 'examples' / 'basic_demo.py'
+        profile = ProfileConfig('default', 'fake', 'model', max_rounds=2)
+        config = ResolvedConfig(None, path.parent, 'default', {'default': profile})
+        # Exercise both a single-response batch and tools spread over rounds.
+        # Reusing the same path also exercises cached preparation with fresh state.
+        batches = [
+            [response(call('change', 'execute', code='x += 3\nz = x + y'),
+                      call('done', 'finish', outcome={'kind': 'none'}))],
+            [response(call('increment', 'execute', code='x += 3')),
+             response(call('assign', 'execute', code='z = x + y'),
+                      call('done', 'finish', outcome={'kind': 'none'}))],
+        ]
+        for responses in batches:
+            with self.subTest(rounds=len(responses)):
+                provider = Mock()
+                provider.complete.side_effect = responses
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    result = run_script(path, config=config, agent_factory=lambda _: ToolAgent(provider))
+                self.assertEqual(tuple(result[key] for key in ('x', 'y', 'z')), (13, 20, 33))
+                self.assertEqual(out.getvalue(), '13 20 33\n')
+                self.assertEqual(provider.complete.call_count, len(responses))
+                payload = json.loads(provider.complete.call_args_list[0].args[0][1]['content'])
+                self.assertEqual(payload['statement'], 'add 3 to x\nset z to the sum of x plus y')
+                self.assertFalse(payload['requires_result'])
+
+    def test_recovery_repairs_missing_binding_without_replaying_completed_work(self):
+        provider = Mock()
+        provider.complete.return_value = response(
+            call('repair', 'execute', code='z = x + y'),
+            call('retry', 'recover', action='retry'))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = self.run_source('x = 10\ny = 20\nx += 3\nprint(x, y, z)\n', provider)
+        self.assertEqual(tuple(result[key] for key in ('x', 'y', 'z')), (13, 20, 33))
+        self.assertEqual(out.getvalue(), '13 20 33\n')
+        self.assertEqual(provider.complete.call_count, 1)

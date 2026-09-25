@@ -5,11 +5,11 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from aithon.agent import ToolAgent
-from aithon.capabilities import CapabilityPermissionError
-from aithon.cli import run_script
-from aithon.codebase import Codebase
-from aithon.models import ProfileConfig, ResolvedConfig
+from aiython.agent import ToolAgent
+from aiython.capabilities import CapabilityPermissionError
+from aiython.cli import run_script
+from aiython.codebase import Codebase
+from aiython.models import ProfileConfig, ResolvedConfig
 
 
 def call(identifier, name, **args):
@@ -41,8 +41,8 @@ class CodebaseTests(unittest.TestCase):
 
     def test_exclusions_and_path_escape(self):
         self.write('safe.py', 'public')
-        for name in ('.env', 'aithon.toml', 'secret.json', '.git/config',
-                     '.hidden.py', 'node_modules/x.py', 'venv/x.py', '.aithon/x.md'):
+        for name in ('.env', 'aiython.toml', 'secret.json', '.git/config',
+                     '.hidden.py', 'node_modules/x.py', 'venv/x.py', '.aiython/x.md'):
             self.write(name, 'secret')
             with self.subTest(name=name), self.assertRaises(ValueError):
                 self.code.read(name)

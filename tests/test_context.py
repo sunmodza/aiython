@@ -4,10 +4,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from aithon.cli import run_script
-from aithon.frontend import parse
-from aithon.models import AgentRequest, ProfileConfig, RecoveryDecision, ResolvedConfig, SourceSpan
-from aithon.runtime import Runtime, RuntimeBridge
+from aiython.cli import run_script
+from aiython.frontend import parse
+from aiython.models import AgentRequest, ProfileConfig, RecoveryDecision, ResolvedConfig, SourceSpan
+from aiython.runtime import Runtime, RuntimeBridge
 
 
 class ContextTests(unittest.TestCase):
@@ -30,8 +30,9 @@ def evaluate(p: Params) -> float:
 review this context please
 ''')
             profile = ProfileConfig('default', 'fake', 'model')
-            run_script(path, config=ResolvedConfig(None,path.parent,'default',{'default':profile}),
-                       agent_factory=lambda _: Agent())
+            for _ in range(2):
+                run_script(path, config=ResolvedConfig(None,path.parent,'default',{'default':profile}),
+                           agent_factory=lambda _: Agent())
         self.assertFalse(any(name.startswith('__') for name in captured))
         self.assertEqual(captured['Params']['type'], 'class')
         self.assertEqual(captured['Params']['name'], 'Params')

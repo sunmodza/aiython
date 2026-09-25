@@ -8,10 +8,10 @@ import unittest
 from unittest.mock import Mock
 from unittest.mock import patch
 
-from aithon.agent import ToolAgent
-from aithon.cli import run_script
-from aithon.config import resolve
-from aithon.models import ProfileConfig, ResolvedConfig
+from aiython.agent import ToolAgent
+from aiython.cli import run_script
+from aiython.config import resolve
+from aiython.models import ProfileConfig, ResolvedConfig
 
 
 class HeldOutPrograms(unittest.TestCase):
@@ -27,7 +27,7 @@ assert "litellm" not in sys.modules
 assert "openrouter" not in sys.modules
 print(left)
 ''')
-            result = subprocess.run([sys.executable, '-m', 'aithon', str(script)],
+            result = subprocess.run([sys.executable, '-m', 'aiython', str(script)],
                                     capture_output=True, text=True)
         self.assertEqual((result.returncode, result.stdout), (0, '2178309\n'), result.stderr)
 
@@ -59,14 +59,14 @@ for n in range(1, 7):
     def test_v3_config_to_litellm_to_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'aithon.toml').write_text('version=3\nmodel="openai/test"\n')
+            (root / 'aiython.toml').write_text('version=3\nmodel="openai/test"\n')
             script = root / 'program.py'
             script.write_text('left = 8\nright = 13\nanswer: int = add the two numbers\n')
             sdk = Mock(completion=Mock(return_value={'choices': [{'message': {
                 'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'done', 'type': 'function',
                 'function': {'name': 'finish', 'arguments': json.dumps({
                     'outcome': {'kind': 'expression', 'code': 'left + right'}})}}]}}]}))
-            with patch('aithon.providers.sdk', return_value=sdk):
+            with patch('aiython.providers.sdk', return_value=sdk):
                 result = run_script(script, config=resolve(script))
         self.assertEqual(result['answer'], 21)
         self.assertEqual(sdk.completion.call_count, 1)

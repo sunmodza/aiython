@@ -8,10 +8,10 @@ from threading import Thread
 import unittest
 from unittest.mock import Mock, patch
 
-from aithon.assets import Audio, Document, Image, Video
-from aithon.capabilities import CapabilityRequest, CapabilityRuntime, Embeddings, InvocationError
-from aithon.capability_providers import LiteLLMAdapter
-from aithon.models import ConfigError, ProfileConfig, ResolvedConfig
+from aiython.assets import Audio, Document, Image, Video
+from aiython.capabilities import CapabilityRequest, CapabilityRuntime, Embeddings, InvocationError
+from aiython.capability_providers import LiteLLMAdapter
+from aiython.models import ConfigError, ProfileConfig, ResolvedConfig
 
 
 class LiteLLMCapabilityTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class LiteLLMCapabilityTests(unittest.TestCase):
         self.context = CapabilityRuntime(self.config)
         self.adapter = LiteLLMAdapter(self.config, self.profile, 'sdk')
         self.sdk = Mock()
-        patcher = patch('aithon.capability_providers.sdk', return_value=self.sdk)
+        patcher = patch('aiython.capability_providers.sdk', return_value=self.sdk)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -83,7 +83,7 @@ class LiteLLMCapabilityTests(unittest.TestCase):
         self.assertNotIn('response_format', self.sdk.image_edit.call_args.kwargs)
 
     def test_openrouter_audio_uses_litellm_openai_compatible_endpoints(self):
-        from aithon.providers import sdk as load_sdk
+        from aiython.providers import sdk as load_sdk
         litellm = load_sdk()
 
         requests = []
@@ -111,7 +111,7 @@ class LiteLLMCapabilityTests(unittest.TestCase):
         self.config.providers['sdk']['api_key_env'] = 'TEST_AUDIO_KEY'
         self.config.secrets['TEST_AUDIO_KEY'] = 'test-key'
         try:
-            with patch('aithon.capability_providers.sdk', return_value=litellm):
+            with patch('aiython.capability_providers.sdk', return_value=litellm):
                 audio = self.asset('speech.mp3', b'ID3abc', Audio)
                 self.assertEqual(self.invoke('speech_to_text', {'assets': [audio]},
                                              model='openrouter/openai/gpt-transcribe'), 'heard words')
@@ -130,7 +130,7 @@ class LiteLLMCapabilityTests(unittest.TestCase):
             server.server_close()
 
     def test_openrouter_image_generation_uses_litellm_without_response_format(self):
-        from aithon.providers import sdk as load_sdk
+        from aiython.providers import sdk as load_sdk
         litellm = load_sdk()
 
         requests = []
@@ -157,7 +157,7 @@ class LiteLLMCapabilityTests(unittest.TestCase):
         self.config.providers['sdk']['api_key_env'] = 'TEST_IMAGE_KEY'
         self.config.secrets['TEST_IMAGE_KEY'] = 'test-key'
         try:
-            with patch('aithon.capability_providers.sdk', return_value=litellm):
+            with patch('aiython.capability_providers.sdk', return_value=litellm):
                 image = self.invoke('image_generation', {'prompt': 'a blue circle'},
                                     model='openrouter/google/gemini-3.1-flash-image')
             self.assertEqual(image.path.read_bytes(), b'PNG image')
@@ -172,7 +172,7 @@ class LiteLLMCapabilityTests(unittest.TestCase):
         self.sdk.video_generation.return_value = {'id': 'operations/test'}
         self.sdk.video_status.side_effect = [{'status': 'in_progress'}, {'status': 'completed'}]
         self.sdk.video_content.return_value = b'video-content'
-        with patch('aithon.capability_providers.time.sleep'):
+        with patch('aiython.capability_providers.time.sleep'):
             video = self.invoke('video', {'mode': 'generate', 'prompt': 'tree'})
         self.assertIsInstance(video, Video)
         self.assertEqual(video.path.read_bytes(), b'video-content')
@@ -303,7 +303,7 @@ class LiteLLMCapabilityTests(unittest.TestCase):
         self.assertEqual(self.sdk.video_generation.call_count, 1)
 
     def test_runtime_v3_state_preserves_legacy_database(self):
-        folder = self.root / '.aithon'
+        folder = self.root / '.aiython'
         folder.mkdir()
         legacy = folder / 'runtime.sqlite'
         legacy.write_bytes(b'legacy state')
@@ -315,7 +315,7 @@ class LiteLLMCapabilityTests(unittest.TestCase):
         large = self.asset('long.mp3', b'x' * (10 * 1024 * 1024 + 1), Audio)
         self.sdk.create_file.return_value = {'id': 'files/123', 'status': 'uploaded'}
         self.sdk.file_retrieve.return_value = {'id': 'files/123', 'status': 'processed'}
-        with patch('aithon.capability_providers.time.sleep'):
+        with patch('aiython.capability_providers.time.sleep'):
             part = self.adapter._part(large, 'gemini/test')
         self.assertEqual(part, {'type': 'file', 'file': {'file_id': 'files/123'}})
         self.assertEqual(self.sdk.create_file.call_count, 1)

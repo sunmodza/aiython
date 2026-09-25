@@ -6,11 +6,11 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from aithon.agent import ToolAgent
-from aithon.cli import run_script
-from aithon.models import ProfileConfig, ResolvedConfig
-from aithon.runtime import Runtime, RuntimeBridge
-from aithon.source_guard import SourceWriteError
+from aiython.agent import ToolAgent
+from aiython.cli import run_script
+from aiython.models import ProfileConfig, ResolvedConfig
+from aiython.runtime import Runtime, RuntimeBridge
+from aiython.source_guard import SourceWriteError
 
 
 def response(identifier, name, **args):

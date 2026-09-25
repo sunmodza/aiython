@@ -7,12 +7,12 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from aithon.agent import ToolAgent, validate_schema
-from aithon.models import AgentRequest, ProfileConfig, ProviderError, RecoveryRequest, ResolvedConfig, SourceSpan
-from aithon.prompt_cache import canonical
-from aithon.providers import LiteLLMProvider
-from aithon.runtime import Runtime, RuntimeBridge
-from aithon.stats import CURRENT_STATS, InvocationStats, record_token_usage
+from aiython.agent import ToolAgent, validate_schema
+from aiython.models import AgentRequest, ProfileConfig, ProviderError, RecoveryRequest, ResolvedConfig, SourceSpan
+from aiython.prompt_cache import canonical
+from aiython.providers import LiteLLMProvider
+from aiython.runtime import Runtime, RuntimeBridge
+from aiython.stats import CURRENT_STATS, InvocationStats, record_token_usage
 
 
 def call(id, tool_name, **args):
@@ -92,6 +92,22 @@ class BatchTests(unittest.TestCase):
                     origin=self.request().span, attempt=1, replacement_target=target)
                 ToolAgent(provider).recover(request, self.bridge(inspect.currentframe()))
                 self.assertEqual(items, [])
+
+    def test_disallowed_retry_batch_is_rejected_before_effects(self):
+        items = []
+        provider = Mock()
+        provider.complete.side_effect = [response(
+            call('change', 'execute', code='items.append(1)'),
+            call('bad', 'recover', action='retry')),
+            response(call('corrected', 'recover', action='reraise'))]
+        request = RecoveryRequest(**vars(self.request()), exception=NameError('bad'), traceback=None,
+                                  origin=self.request().span, attempt=1, retry_allowed=False)
+        bridge = self.bridge(inspect.currentframe(), stats=True)
+        decision = ToolAgent(provider).recover(request, bridge)
+        self.assertEqual(decision.action, 'reraise')
+        self.assertEqual(items, [])
+        self.assertEqual(bridge.manager.stats.invocations[0].invalid_batches, 1)
+        self.assertFalse(json.loads(provider.complete.call_args_list[0].args[0][1]['content'])['retry_allowed'])
 
     def test_token_usage_records_only_valid_counts(self):
         stats = InvocationStats('test.py', 1, 'syntax')
@@ -319,7 +335,7 @@ class BatchTests(unittest.TestCase):
         bridge = self.bridge(inspect.currentframe(), stats=True)
         progress = io.StringIO()
         with contextlib.redirect_stderr(progress), patch.dict('os.environ', {'TEST_AI_KEY': key}), \
-             patch('aithon.providers.sdk', return_value=sdk):
+             patch('aiython.providers.sdk', return_value=sdk):
             ToolAgent(provider).execute(request, bridge)
         record = bridge.manager.stats.invocations[0]
         self.assertEqual((record.model_calls, record.tools), (1, 1))

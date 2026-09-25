@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from aithon.config import credential, describe, resolve
-from aithon.models import ConfigError
+from aiython.config import credential, describe, resolve
+from aiython.models import ConfigError
 
 
 class ConfigTests(unittest.TestCase):
@@ -13,7 +13,7 @@ class ConfigTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.path = self.root / 'aithon.toml'
+        self.path = self.root / 'aiython.toml'
 
     def test_default_and_capability_routes(self):
         self.path.write_text('''version = 3
@@ -37,9 +37,9 @@ reranking = { model = "cohere/rerank", api_key_env = "COHERE_KEY" }
         self.assertNotIn('secret', str(describe(config)))
 
     def test_project_scoped_credentials_and_process_override(self):
-        self.path.write_text('version=3\nmodel="openai/test"\nenv_file=".aithon/credentials.env"\napi_key_env="TEST_AI_KEY"\n')
-        (self.root / '.aithon').mkdir()
-        (self.root / '.aithon/credentials.env').write_text('TEST_AI_KEY="project-key"\n')
+        self.path.write_text('version=3\nmodel="openai/test"\nenv_file=".aiython/credentials.env"\napi_key_env="TEST_AI_KEY"\n')
+        (self.root / '.aiython').mkdir()
+        (self.root / '.aiython/credentials.env').write_text('TEST_AI_KEY="project-key"\n')
         config = resolve(self.root / 'main.py')
         self.assertEqual(credential(config, config.profiles['default']), 'project-key')
         with patch.dict(os.environ, {'TEST_AI_KEY': 'environment-key'}):
@@ -84,5 +84,5 @@ reranking = { model = "cohere/rerank", api_key_env = "COHERE_KEY" }
         selected = resolve(example / 'demo.py')
         self.assertEqual(selected.path, self.path)
         self.assertEqual(selected.project_root, self.root)
-        (example / 'aithon.toml').write_text('version=3\nmodel="openrouter/other"\n')
-        self.assertEqual(resolve(example / 'demo.py').path, example / 'aithon.toml')
+        (example / 'aiython.toml').write_text('version=3\nmodel="openrouter/other"\n')
+        self.assertEqual(resolve(example / 'demo.py').path, example / 'aiython.toml')

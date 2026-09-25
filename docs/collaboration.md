@@ -1,12 +1,12 @@
 # Collaboration across parallel Python work
 
-Python owns task creation, scheduling, loops, and side effects. Aithon offers an
+Python owns task creation, scheduling, loops, and side effects. Aiython offers an
 optional group mailbox when tasks need to exchange messages. Ordinary scripts do
 not create a broker or add collaboration tools to model requests.
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
-from aithon import group, join
+from aiython import group, join
 
 def worker(ticket):
     with join(ticket) as me:
@@ -33,10 +33,10 @@ capability adapters run in a worker thread for the duration of the plan, so
 other coroutines can continue while a capability call is in flight.
 
 For `ProcessPoolExecutor` with `spawn` or `forkserver`, submit the importable
-`aithon.worker_entry` when the worker is in a project module:
+`aiython.worker_entry` when the worker is in a project module:
 
 ```python
-from aithon import worker_entry
+from aiython import worker_entry
 
 future = pool.submit(worker_entry, ticket, "my_project.workers", "run", payload)
 ```
@@ -44,11 +44,11 @@ future = pool.submit(worker_entry, ticket, "my_project.workers", "run", payload)
 The worker function receives the ticket as its first argument and calls
 `join(ticket)` inside the task it wants to register. The CLI provides an
 import-safe main-module bootstrap while a group is active, so a process can
-re-import an Aithon entry script without parsing its natural-language blocks as
+re-import an Aiython entry script without parsing its natural-language blocks as
 plain Python. The worker function must still be importable, as Python's process
 executors require. `worker_entry` installs the project loader before importing
-the worker, so Aithon blocks in the worker or its imported project modules are
-handled the same way. Under `InterpreterPoolExecutor`, it uses an isolated
+the worker, so Aiython blocks in the worker or its imported project modules are
+handled the same way. On Python 3.14+, `InterpreterPoolExecutor` is available; under that executor, Aiython uses an isolated
 Python process because the current `pydantic-core` native extension cannot
 load in a subinterpreter. The worker still joins the same group and returns
 its result through the executor. A subinterpreter reuses its isolated worker
@@ -78,9 +78,9 @@ that need durable delivery should persist their own work and acknowledge it at
 the application level. Group tickets are bearer credentials: do not log or
 publish them. Closing a group invalidates its tickets and wakes waiters.
 
-For a separately hosted A2A agent, install `aithon[a2a]` and call
+For a separately hosted A2A agent, install `aiython[a2a]` and call
 `await participant.send_a2a(url, payload)`. This uses the official A2A SDK,
 returns its task/message events, and does not retry an uncertain submission.
-For bearer authentication, pass `api_key_env="MY_A2A_KEY"`; Aithon reads the
+For bearer authentication, pass `api_key_env="MY_A2A_KEY"`; Aiython reads the
 environment variable and does not store the key in a ticket or message.
 Local mailbox traffic does not use A2A or HTTP.

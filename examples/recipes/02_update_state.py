@@ -5,7 +5,6 @@ tasks = [
 ]
 original_tasks = tasks
 
-# aithon: prompt="Update the existing list and dictionaries in place; keep their order and IDs."
 review each note in tasks and set done to True only for completed tasks
 
 assert tasks is original_tasks

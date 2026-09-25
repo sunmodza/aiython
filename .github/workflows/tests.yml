@@ -1,0 +1,40 @@
+name: Offline tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.11"
+          version: latest-known
+      - run: uv build --no-sources
+      - run: uv venv --python 3.11 /tmp/aiython-wheel-smoke
+      - run: uv pip install --python /tmp/aiython-wheel-smoke/bin/python dist/*.whl
+      - run: /tmp/aiython-wheel-smoke/bin/aiython --version
+      - run: |
+          printf 'value = 1\nprint(value + 1)\n' > /tmp/aiython-wheel-smoke/plain.py
+          test "$(cd /tmp && /tmp/aiython-wheel-smoke/bin/aiython /tmp/aiython-wheel-smoke/plain.py)" = 2
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          version: latest-known
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv run --locked python -m unittest discover -s tests -q

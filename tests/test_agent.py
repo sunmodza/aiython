@@ -5,11 +5,11 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from aithon.agent import ToolAgent
-from aithon.models import AgentRequest, ConfigError, ProfileConfig, ProviderError, ResolvedConfig, SourceSpan
-from aithon.providers import INVOCATION_DEADLINE, LiteLLMProvider, load_provider, parse_completion
-from aithon.runtime import Runtime, RuntimeBridge
-from aithon.stats import CURRENT_STATS, InvocationStats
+from aiython.agent import ToolAgent
+from aiython.models import AgentRequest, ConfigError, ProfileConfig, ProviderError, ResolvedConfig, SourceSpan
+from aiython.providers import INVOCATION_DEADLINE, LiteLLMProvider, load_provider, parse_completion
+from aiython.runtime import Runtime, RuntimeBridge
+from aiython.stats import CURRENT_STATS, InvocationStats
 
 
 def tool(identifier, name, **args):
@@ -54,7 +54,7 @@ class AgentTests(unittest.TestCase):
         profile.routes['reasoning'] = [{'provider': 'test:reasoning:0', 'model': 'openai/test'}]
         response = {'choices': [{'finish_reason': 'length', 'message': tool('change', 'execute', code='items.append(1)')}]}
         fake_sdk = Mock(completion=Mock(return_value=response))
-        with patch('aithon.providers.sdk', return_value=fake_sdk):
+        with patch('aiython.providers.sdk', return_value=fake_sdk):
             with self.assertRaisesRegex(ProviderError, 'did not complete'):
                 ToolAgent(LiteLLMProvider(config, profile)).execute(self.request_with_profile(profile), self.bridge(inspect.currentframe()))
         self.assertEqual(items, [])
@@ -71,7 +71,7 @@ class AgentTests(unittest.TestCase):
         provider = load_provider(config, profile)
         self.assertIsInstance(provider, LiteLLMProvider)
         fake_sdk = Mock(completion=Mock(return_value={'choices': [{'message': tool('done', 'finish', outcome={'kind': 'literal', 'value': 7})}]}))
-        with patch.dict('os.environ', {'TEST_AI_KEY': 'private-key'}), patch('aithon.providers.sdk', return_value=fake_sdk):
+        with patch.dict('os.environ', {'TEST_AI_KEY': 'private-key'}), patch('aiython.providers.sdk', return_value=fake_sdk):
             self.assertEqual(ToolAgent(provider).execute(self.request_with_profile(profile), self.bridge(inspect.currentframe())), 7)
         kwargs = fake_sdk.completion.call_args.kwargs
         self.assertEqual(kwargs['model'], 'openai/test')
@@ -80,7 +80,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(kwargs['max_retries'], 0)
         self.assertLessEqual(kwargs['timeout'], 120)
         failure = Mock(completion=Mock(side_effect=TimeoutError('private-key')))
-        with patch.dict('os.environ', {'TEST_AI_KEY': 'private-key'}), patch('aithon.providers.sdk', return_value=failure):
+        with patch.dict('os.environ', {'TEST_AI_KEY': 'private-key'}), patch('aiython.providers.sdk', return_value=failure):
             with self.assertRaises(ProviderError) as caught:
                 provider.complete([], [])
         self.assertEqual(failure.completion.call_count, 1)
@@ -89,7 +89,7 @@ class AgentTests(unittest.TestCase):
         unauthorized = Exception('private-key')
         unauthorized.status_code = 401
         failure.completion.side_effect = unauthorized
-        with patch.dict('os.environ', {'TEST_AI_KEY': 'private-key'}), patch('aithon.providers.sdk', return_value=failure):
+        with patch.dict('os.environ', {'TEST_AI_KEY': 'private-key'}), patch('aiython.providers.sdk', return_value=failure):
             with self.assertRaisesRegex(ProviderError, 'authentication failed; check the configured API key'):
                 provider.complete([], [])
 
@@ -97,9 +97,9 @@ class AgentTests(unittest.TestCase):
         profile = self.request().profile
         profile.routes['reasoning'] = [{'provider': 'route', 'model': 'openrouter/test'}]
         config = ResolvedConfig(None, Path.cwd(), providers={
-            'route': {'model': 'openrouter/test', 'api_key_env': 'AITHON_TEST_MISSING_KEY'}})
+            'route': {'model': 'openrouter/test', 'api_key_env': 'AIYTHON_TEST_MISSING_KEY'}})
         with patch.dict('os.environ', {}, clear=True):
-            with self.assertRaisesRegex(ConfigError, 'Missing credential AITHON_TEST_MISSING_KEY'):
+            with self.assertRaisesRegex(ConfigError, 'Missing credential AIYTHON_TEST_MISSING_KEY'):
                 ToolAgent(LiteLLMProvider(config, profile)).execute(
                     self.request_with_profile(profile), self.bridge(inspect.currentframe()))
 
@@ -120,7 +120,7 @@ class AgentTests(unittest.TestCase):
         config = ResolvedConfig(None, Path.cwd(), providers={'route': {'model': 'openai/test'}})
         provider = LiteLLMProvider(config, profile)
         sdk = Mock(completion=Mock(return_value={'choices': [{'message': tool('done', 'finish', outcome={'kind': 'none'})}]}))
-        with patch('aithon.providers.sdk', return_value=sdk):
+        with patch('aiython.providers.sdk', return_value=sdk):
             token = INVOCATION_DEADLINE.set(time.monotonic() + 0.1)
             try:
                 provider.complete([], [])

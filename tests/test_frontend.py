@@ -1,7 +1,7 @@
 import unittest
 
-from aithon.frontend import parse
-from aithon.models import DirectiveError
+from aiython.frontend import parse
+from aiython.models import DirectiveError
 
 
 class FrontendTests(unittest.TestCase):
@@ -66,18 +66,18 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("do second thing", next(iter(unit.blocks.values())).statement)
 
     def test_directives_split_blocks(self):
-        unit = parse('do first thing\n# aithon: profile="fast"\ndo second thing')
+        unit = parse('do first thing\n# aiython: profile="fast"\ndo second thing')
         self.assertEqual(len(unit.blocks), 2)
 
     def test_invalid_directives(self):
-        for source in ['# aithon: end\nx=1', '# aithon: begin\nx=1',
-                       '# aithon: typo="x"\nx=1', '# aithon: prompt="hello"',
-                       '# aithon: profile="a"\n# aithon: profile="b"\nx=1']:
+        for source in ['# aiython: end\nx=1', '# aiython: begin\nx=1',
+                       '# aiython: typo="x"\nx=1', '# aiython: prompt="hello"',
+                       '# aiython: profile="a"\n# aiython: profile="b"\nx=1']:
             with self.subTest(source=source), self.assertRaises(DirectiveError):
                 parse(source)
 
     def test_comment_text_in_string_is_ignored(self):
-        unit = parse('s = """\n# aithon: end\n"""\nx=1 # aithon: end')
+        unit = parse('s = """\n# aiython: end\n"""\nx=1 # aiython: end')
         self.assertFalse(unit.directives.annotations)
 
     def test_no_ai_for_valid_python(self):

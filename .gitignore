@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+repomix-output.xml
 
 # Virtual environments
 .venv
@@ -15,7 +16,7 @@ wheels/
 !.env.example
 
 # Runtime assets, indexes, caches and operations
-.aithon/
-/examples/capabilities/aithon.toml
-/examples/recipes/aithon.toml
-/examples/aithon.toml
+.aiython/
+/examples/capabilities/aiython.toml
+/examples/recipes/aiython.toml
+/examples/aiython.toml

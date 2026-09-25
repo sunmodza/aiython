@@ -8,15 +8,15 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from aithon.agent import ToolAgent
-from aithon.assets import Image, Document, Video
-from aithon.capabilities import (CapabilityRuntime, CapabilityResult, Embeddings,
+from aiython.agent import ToolAgent
+from aiython.assets import Image, Document, Video
+from aiython.capabilities import (CapabilityRuntime, CapabilityResult, Embeddings,
     CapabilityError, CapabilityPermissionError, InvocationError, LocalProvider)
-from aithon.cli import run_script, main
-from aithon.config import resolve, describe
-from aithon.models import ProfileConfig, ResolvedConfig, AgentRequest, SourceSpan, ConfigError
-from aithon.runtime import Runtime, RuntimeBridge
-from aithon.type_constraints import validate_output
+from aiython.cli import run_script, main
+from aiython.config import resolve, describe
+from aiython.models import ProfileConfig, ResolvedConfig, AgentRequest, SourceSpan, ConfigError
+from aiython.runtime import Runtime, RuntimeBridge
+from aiython.type_constraints import validate_output
 
 
 def call(id, name, **args):
@@ -212,7 +212,7 @@ class CapabilityTests(unittest.TestCase):
             self.caps.invoke(self.profile,'semantic_search',{'index':index,'query':Embeddings([[1.,0.]],'new')})
 
     def test_v3_routes_and_secret_redaction(self):
-        path = self.root / 'aithon.toml'
+        path = self.root / 'aiython.toml'
         path.write_text('''version = 3
 model = "openrouter/chosen"
 api_key_env = "SECRET_SENTINEL"
@@ -225,7 +225,7 @@ embedding = "openai/text-embedding-3-small"
 
     def test_typed_assignment_and_directive_reaches_request(self):
         script = self.root / 'main.py'
-        script.write_text('# aithon: capability="semantic-search" provider="local"\nresult: list[int] = find these results\n')
+        script.write_text('# aiython: capability="semantic-search" provider="local"\nresult: list[int] = find these results\n')
         requests = []
         class FakeAgent:
             def execute(self, request, runtime):
@@ -245,23 +245,23 @@ embedding = "openai/text-embedding-3-small"
     def test_explain_is_static_and_unknown(self):
         script = self.root / 'main.py'; script.write_text('answer = find the answer\n')
         output = io.StringIO()
-        with contextlib.redirect_stdout(output), patch('aithon.providers.sdk') as remote:
+        with contextlib.redirect_stdout(output), patch('aiython.providers.sdk') as remote:
             main(['--explain',str(script)])
         remote.assert_not_called()
         self.assertEqual(json.loads(output.getvalue())['blocks'][0]['cache'],'unknown')
 
 
 class LiveCapabilityTests(unittest.TestCase):
-    @unittest.skipUnless(__import__('os').environ.get('AITHON_LIVE_CAPABILITY_CONFIG') and
-                         __import__('os').environ.get('AITHON_LIVE_CAPABILITY_CASES'),
+    @unittest.skipUnless(__import__('os').environ.get('AIYTHON_LIVE_CAPABILITY_CONFIG') and
+                         __import__('os').environ.get('AIYTHON_LIVE_CAPABILITY_CASES'),
                          'Paid provider tests are opt-in')
     def test_configured_live_routes(self):
         import os
-        path = Path(os.environ['AITHON_LIVE_CAPABILITY_CONFIG']).resolve()
+        path = Path(os.environ['AIYTHON_LIVE_CAPABILITY_CONFIG']).resolve()
         config = resolve(path.parent / 'main.py',config_path=str(path))
         runtime = CapabilityRuntime(config)
         profile = config.profiles[config.default_profile]
-        cases = json.loads(os.environ['AITHON_LIVE_CAPABILITY_CASES'])
+        cases = json.loads(os.environ['AIYTHON_LIVE_CAPABILITY_CASES'])
         self.assertTrue(cases)
         for case in cases:
             with self.subTest(capability=case['capability']):

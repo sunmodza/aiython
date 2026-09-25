@@ -1,18 +1,18 @@
-# Small Aithon examples
+# Small Aiython examples
 
 Each file isolates one behavior and can be inspected without a model:
 
 ```bash
-uv run aithon --explain examples/recipes/01_typed_result.py
+uv run aiython --explain examples/recipes/01_typed_result.py
 ```
 
-To run an example with a tool-calling model, run `aithon setup` at the repository
+To run an example with a tool-calling model, run `aiython setup` at the repository
 root. These scripts inherit that project configuration. The local
-`aithon.toml.example` is a template only; copying it here creates a separate
+`aiython.toml.example` is a template only; copying it here creates a separate
 configuration with separate credential resolution. Then run, for example:
 
 ```bash
-uv run aithon --stats examples/recipes/01_typed_result.py
+uv run aiython --stats examples/recipes/01_typed_result.py
 ```
 
 | File | Behavior |

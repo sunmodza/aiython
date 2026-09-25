@@ -1,0 +1,124 @@
+{
+  "method": "median of pooled raw samples per variant; no cross-case aggregate",
+  "before_files": [
+    "benchmarks/results/overhead-before-1.json",
+    "benchmarks/results/overhead-before-2.json"
+  ],
+  "after_files": [
+    "benchmarks/results/overhead-after-1.json",
+    "benchmarks/results/overhead-after-2.json"
+  ],
+  "before_source_sha256": "e3e8008d5b3edc1128b86bc822c1f325e2592e6e6e81ca4deb0bb1538efe9180",
+  "after_source_sha256": "cb7e89c34c8d0db9255c27542f252397e3e5449e2607a2f210bda10af18534a1",
+  "runner_sha256": "664433f685635ba5c78287abd2aa37ce35a10b87d4528e5d25a16e0b5d261b3d",
+  "cases": {
+    "untyped_scalar_10000": {
+      "before_median_ms": 17.431027488783002,
+      "after_median_ms": 17.1392730117077,
+      "time_reduction_percent": 1.673765228487234,
+      "speedup": 1.0170225701449533,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "typed_scalar_10000": {
+      "before_median_ms": 26.290076493751258,
+      "after_median_ms": 20.385395997436717,
+      "time_reduction_percent": 22.459731137404603,
+      "speedup": 1.289652479503317,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "untyped_list_800": {
+      "before_median_ms": 1.2427790061337873,
+      "after_median_ms": 1.158014012617059,
+      "time_reduction_percent": 6.820600693958234,
+      "speedup": 1.0731985905120123,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "typed_list_400": {
+      "before_median_ms": 62.72501000785269,
+      "after_median_ms": 2.6211469958070666,
+      "time_reduction_percent": 95.82120912299747,
+      "speedup": 23.93036716681328,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "typed_list_800": {
+      "before_median_ms": 249.64317999547347,
+      "after_median_ms": 8.82922399614472,
+      "time_reduction_percent": 96.46326248676019,
+      "speedup": 28.27464566585695,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "ai_invocations_100": {
+      "before_median_ms": 15.335805001086555,
+      "after_median_ms": 9.655890986323357,
+      "time_reduction_percent": 37.0369472900886,
+      "speedup": 1.5882330302618632,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "prepare_repeated_source_50": {
+      "before_median_ms": 36.842172499746084,
+      "after_median_ms": 2.175249013816938,
+      "time_reduction_percent": 94.0957634519736,
+      "speedup": 16.93699078391887,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "fresh Runtime, repeated identical source in one process"
+    },
+    "prepare_cold_source_50": {
+      "before_median_ms": 36.85903499717824,
+      "after_median_ms": 32.20785400480963,
+      "time_reduction_percent": 12.618835497795,
+      "speedup": 1.1444113908264129,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "fresh Runtime and filename; preparation cache miss; imports warm"
+    },
+    "sqlite_hits_100": {
+      "before_median_ms": 5.2352650091052055,
+      "after_median_ms": 0.7364270131802186,
+      "time_reduction_percent": 85.93333839071336,
+      "speedup": 7.1090072952335195,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "100 existing cache lookups"
+    },
+    "capability_plans_20": {
+      "before_median_ms": 14.828205996309407,
+      "after_median_ms": 6.497293506981805,
+      "time_reduction_percent": 56.1828753350276,
+      "speedup": 2.282212736791934,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "20 plans with two independent immediate fake adapter calls each; cache disabled"
+    },
+    "startup_plain_python": {
+      "before_median_ms": 8.506194004439749,
+      "after_median_ms": 8.476960996631533,
+      "time_reduction_percent": 0.34366730635296827,
+      "speedup": 1.0034485245148388,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "new Python process; filesystem caches may be warm"
+    },
+    "startup_aiython": {
+      "before_median_ms": 91.86967900313903,
+      "after_median_ms": 54.70673799572978,
+      "time_reduction_percent": 40.45180239079692,
+      "speedup": 1.6793119525845255,
+      "before_samples": 14,
+      "after_samples": 14,
+      "scope": "new Aiython process, no project configuration; filesystem caches may be warm"
+    }
+  }
+}

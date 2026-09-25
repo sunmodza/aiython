@@ -5,10 +5,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from aithon.agent import ToolAgent
-from aithon.cli import run_script
-from aithon.models import ProfileConfig, ResolvedConfig
-from aithon.prompt_cache import canonical
+from aiython.agent import ToolAgent
+from aiython.cli import run_script
+from aiython.models import ProfileConfig, ResolvedConfig
+from aiython.prompt_cache import canonical
 
 
 class PromptContextTests(unittest.TestCase):

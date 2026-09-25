@@ -1,0 +1,180 @@
+{
+  "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+  "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "repeats": 7,
+  "started_at": "2026-09-24T18:14:04.610183+00:00",
+  "runner_sha256": "664433f685635ba5c78287abd2aa37ce35a10b87d4528e5d25a16e0b5d261b3d",
+  "dependencies": {
+    "typing-extensions": "4.16.0",
+    "python-dotenv": "1.2.3",
+    "pydantic": "2.12.5",
+    "litellm": "1.102.1"
+  },
+  "network": false,
+  "timing": "milliseconds, one untimed warm-up, median of repetitions",
+  "cases": {
+    "untyped_scalar_10000": {
+      "median_ms": 17.83755698124878,
+      "samples_ms": [
+        17.83755698124878,
+        18.608943006256595,
+        17.843465990154073,
+        17.837701976532117,
+        17.560774984303862,
+        17.687022977042943,
+        17.615003016544506
+      ],
+      "source": "answer = 0\nfor i in range(10000):\n    answer += 1\n",
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "typed_scalar_10000": {
+      "median_ms": 26.645730016753078,
+      "samples_ms": [
+        25.994761002948508,
+        26.816216006409377,
+        27.360920008504763,
+        26.249802991515025,
+        26.33034999598749,
+        26.645730016753078,
+        26.692106010159478
+      ],
+      "source": "answer: int = 0\nfor i in range(10000):\n    answer += 1\n",
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "untyped_list_800": {
+      "median_ms": 1.274417998502031,
+      "samples_ms": [
+        1.3408029917627573,
+        1.2817200040444732,
+        1.274417998502031,
+        1.4086129958741367,
+        1.176330988528207,
+        1.2621979985851794,
+        1.2059560103807598
+      ],
+      "source": "items = []\nfor i in range(800):\n    items.append(i)\nanswer = len(items)\n",
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "typed_list_400": {
+      "median_ms": 62.82495800405741,
+      "samples_ms": [
+        62.9611790063791,
+        62.75481398915872,
+        61.431640991941094,
+        62.89305299287662,
+        62.82495800405741,
+        66.12973299343139,
+        62.69520602654666
+      ],
+      "source": "items: list[int] = []\nfor i in range(400):\n    items.append(i)\nanswer = len(items)\n",
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "typed_list_800": {
+      "median_ms": 251.5673710149713,
+      "samples_ms": [
+        254.98292001429945,
+        249.83327800873667,
+        254.04257900663652,
+        250.9355340152979,
+        249.15303400484845,
+        253.80579399643466,
+        251.5673710149713
+      ],
+      "source": "items: list[int] = []\nfor i in range(800):\n    items.append(i)\nanswer = len(items)\n",
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "ai_invocations_100": {
+      "median_ms": 14.992687007179484,
+      "samples_ms": [
+        13.951782020740211,
+        14.438507991144434,
+        18.06230001966469,
+        15.095381997525692,
+        16.17435901425779,
+        14.992687007179484,
+        14.864144992316142
+      ],
+      "source": "answer = 0\nfor i in range(100):\n    value: int = choose one value\n    answer += value\n",
+      "scope": "execution only; preparation/imports excluded"
+    },
+    "prepare_repeated_source_50": {
+      "median_ms": 36.5730190242175,
+      "samples_ms": [
+        36.5730190242175,
+        35.70118499919772,
+        35.16423900146037,
+        37.487663998035714,
+        37.743415974546224,
+        36.84882799279876,
+        36.22393199475482
+      ],
+      "scope": "fresh Runtime, repeated identical source in one process"
+    },
+    "prepare_cold_source_50": {
+      "median_ms": 37.01337301754393,
+      "samples_ms": [
+        37.01337301754393,
+        36.01243402226828,
+        37.261563003994524,
+        38.06270501809195,
+        36.87295501003973,
+        36.765458004083484,
+        37.27577399695292
+      ],
+      "scope": "fresh Runtime and filename; preparation cache miss; imports warm"
+    },
+    "sqlite_hits_100": {
+      "median_ms": 5.396891006967053,
+      "samples_ms": [
+        5.458407016703859,
+        6.119330006185919,
+        4.986380023183301,
+        5.396891006967053,
+        5.826382985105738,
+        5.374638014473021,
+        5.257281009107828
+      ],
+      "scope": "100 existing cache lookups"
+    },
+    "capability_plans_20": {
+      "median_ms": 14.631097990786657,
+      "samples_ms": [
+        15.433775988640264,
+        15.025314001832157,
+        14.631097990786657,
+        13.646528997924179,
+        12.503392994403839,
+        14.348308002809063,
+        18.402525020064786
+      ],
+      "scope": "20 plans with two independent immediate fake adapter calls each; cache disabled"
+    },
+    "startup_plain_python": {
+      "median_ms": 8.337489009136334,
+      "samples_ms": [
+        8.842903014738113,
+        8.337489009136334,
+        8.154659997671843,
+        8.519666007487103,
+        8.10666600591503,
+        8.323157991981134,
+        8.433035982307047
+      ],
+      "scope": "new Python process; filesystem caches may be warm"
+    },
+    "startup_aiython": {
+      "median_ms": 91.23521798755974,
+      "samples_ms": [
+        90.21662798477337,
+        91.23521798755974,
+        88.85176599142142,
+        88.80656299879774,
+        96.43366499221884,
+        98.05437599425204,
+        93.08378701098263
+      ],
+      "scope": "new Aiython process, no project configuration; filesystem caches may be warm"
+    }
+  },
+  "source_sha256": "e3e8008d5b3edc1128b86bc822c1f325e2592e6e6e81ca4deb0bb1538efe9180"
+}

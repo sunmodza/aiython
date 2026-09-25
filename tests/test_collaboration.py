@@ -1,5 +1,9 @@
 import asyncio
-from concurrent.futures import InterpreterPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+try:
+    from concurrent.futures import InterpreterPoolExecutor
+except ImportError:
+    InterpreterPoolExecutor = None
 from dataclasses import replace
 import json
 import inspect
@@ -12,13 +16,13 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
-from aithon import current, group, join, worker_entry
-from aithon.agent import ToolAgent
-from aithon.capabilities import CapabilityResult
-from aithon.cli import run_script
-from aithon.models import AgentRequest, ProfileConfig, ProviderError, ResolvedConfig, SourceSpan
-from aithon.runtime import Runtime, RuntimeBridge
-from aithon.providers import LiteLLMProvider
+from aiython import current, group, join, worker_entry
+from aiython.agent import ToolAgent
+from aiython.capabilities import CapabilityResult
+from aiython.cli import run_script
+from aiython.models import AgentRequest, ProfileConfig, ProviderError, ResolvedConfig, SourceSpan
+from aiython.runtime import Runtime, RuntimeBridge
+from aiython.providers import LiteLLMProvider
 from tests._plain_worker import send as plain_interpreter_send
 
 
@@ -97,12 +101,12 @@ class CollaborationTests(unittest.TestCase):
                     return (await participant.wait_async(1))[0]["payload"]
         self.assertEqual(asyncio.run(scenario()), "still here")
 
-    def test_process_start_methods_import_aithon_source_and_exchange_messages(self):
+    def test_process_start_methods_import_aiython_source_and_exchange_messages(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "aithon.toml").write_text('version = 3\nmodel = "openai/test"\n')
+            (root / "aiython.toml").write_text('version = 3\nmodel = "openai/test"\n')
             (root / "worker.py").write_text(
-                'from aithon import join\n'
+                'from aiython import join\n'
                 'def work(ticket):\n'
                 '    with join(ticket) as me:\n'
                 '        me.send("main", {"ok": True})\n'
@@ -112,7 +116,7 @@ class CollaborationTests(unittest.TestCase):
             (root / "main.py").write_text(
                 'from concurrent.futures import ProcessPoolExecutor\n'
                 'from multiprocessing import get_all_start_methods, get_context\n'
-                'from aithon import group, worker_entry\n'
+                'from aiython import group, worker_entry\n'
                 'if __name__ == "__main__":\n'
                 '    with group() as team:\n'
                 '        answer = []\n'
@@ -126,6 +130,7 @@ class CollaborationTests(unittest.TestCase):
             self.assertEqual(run_script(root / "main.py")["answer"],
                              [(12, {"ok": True}), (12, {"ok": True})])
 
+    @unittest.skipUnless(InterpreterPoolExecutor, "InterpreterPoolExecutor requires Python 3.14")
     def test_plain_interpreter_worker_can_join_directly(self):
         with group() as team:
             ticket = team.invite("worker")
@@ -133,11 +138,12 @@ class CollaborationTests(unittest.TestCase):
                 self.assertEqual(pool.submit(plain_interpreter_send, ticket).result(timeout=20), 7)
             self.assertEqual(team.read()[0]["payload"], 42)
 
+    @unittest.skipUnless(InterpreterPoolExecutor, "InterpreterPoolExecutor requires Python 3.14")
     def test_interpreter_worker_entry_plain_python_uses_same_mailbox(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "worker.py").write_text(
-                'from aithon import join\n'
+                'from aiython import join\n'
                 'def work(ticket):\n'
                 '    with join(ticket) as me:\n'
                 '        me.send("main", 42)\n'
@@ -148,6 +154,7 @@ class CollaborationTests(unittest.TestCase):
                     self.assertEqual(pool.submit(worker_entry, ticket, "worker", "work").result(timeout=20), 7)
                 self.assertEqual(team.read()[0]["payload"], 42)
 
+    @unittest.skipUnless(InterpreterPoolExecutor, "InterpreterPoolExecutor requires Python 3.14")
     def test_interpreter_worker_entry_reuses_one_fallback_process(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -172,6 +179,7 @@ def work(ticket, marker, fail=False):
             self.assertEqual(first, third)
             self.assertEqual(marker.read_text(), "xxx")
 
+    @unittest.skipUnless(InterpreterPoolExecutor, "InterpreterPoolExecutor requires Python 3.14")
     def test_crashed_fallback_worker_does_not_replay_side_effect(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -193,13 +201,14 @@ def work(ticket, marker, crash=False):
                     self.assertIsInstance(pool.submit(worker_entry, ticket, "worker", "work", str(marker)).result(timeout=20), int)
             self.assertEqual(marker.read_text(), "xx")
 
-    def test_interpreter_worker_runs_aithon_source_with_native_dependencies(self):
+    @unittest.skipUnless(InterpreterPoolExecutor, "InterpreterPoolExecutor requires Python 3.14")
+    def test_interpreter_worker_runs_aiython_source_with_native_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "aithon.toml").write_text('version = 3\nmodel = "openai/test"\n')
+            (root / "aiython.toml").write_text('version = 3\nmodel = "openai/test"\n')
             (root / "worker.py").write_text('''import json
 from unittest.mock import patch
-from aithon import join
+from aiython import join
 class FakeSDK:
     def completion(self, **kwargs):
         return {"choices": [{"message": {"role": "assistant", "content": None,
@@ -207,7 +216,7 @@ class FakeSDK:
                 "name": "finish", "arguments": json.dumps({"outcome": {"kind": "literal", "value": 42}})}}]}}]}
 def work(ticket):
     with join(ticket) as participant:
-        with patch("aithon.providers.sdk", return_value=FakeSDK()):
+        with patch("aiython.providers.sdk", return_value=FakeSDK()):
             value = choose a number
         participant.send("main", value)
         return value
@@ -231,15 +240,16 @@ def work(ticket):
                     worker_entry(team.invite("worker"), "worker", "work")
             self.assertEqual(marker.read_text(), "x")
 
-    def test_interpreter_worker_loads_imported_aithon_module(self):
+    @unittest.skipUnless(InterpreterPoolExecutor, "InterpreterPoolExecutor requires Python 3.14")
+    def test_interpreter_worker_loads_imported_aiython_module(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "aithon.toml").write_text('version = 3\nmodel = "openai/test"\n')
+            (root / "aiython.toml").write_text('version = 3\nmodel = "openai/test"\n')
             (root / "nested.py").write_text(
                 'def get_number():\n    value = choose a number\n    return value\n')
             (root / "worker.py").write_text('''import json
 from unittest.mock import patch
-from aithon import join
+from aiython import join
 class FakeSDK:
     def completion(self, **kwargs):
         return {"choices": [{"message": {"role": "assistant", "content": None,
@@ -247,7 +257,7 @@ class FakeSDK:
                 "name": "finish", "arguments": json.dumps({"outcome": {"kind": "literal", "value": 42}})}}]}}]}
 def work(ticket):
     with join(ticket) as participant:
-        with patch("aithon.providers.sdk", return_value=FakeSDK()):
+        with patch("aiython.providers.sdk", return_value=FakeSDK()):
             from nested import get_number
             value = get_number()
         participant.send("main", value)
@@ -315,7 +325,7 @@ def work(ticket):
     def test_a2a_uses_sdk_once_and_preserves_group_metadata(self):
         from a2a.helpers import new_text_message
         from a2a.types import Role, StreamResponse
-        from aithon.a2a import send_a2a
+        from aiython.a2a import send_a2a
 
         class Client:
             async def __aenter__(self):
@@ -337,11 +347,11 @@ def work(ticket):
                                              group_id="group", sender="worker"))
         self.assertEqual(factory.await_count, 1)
         self.assertEqual(response[0]["message"]["parts"][0]["text"], "answer")
-        with patch.dict(os.environ, {"AITHON_TEST_A2A_KEY": "private-key"}), \
+        with patch.dict(os.environ, {"AIYTHON_TEST_A2A_KEY": "private-key"}), \
                 patch("a2a.client.create_client", factory):
             asyncio.run(send_a2a("https://example.test", {"question": "hi"},
                                  group_id="group", sender="worker",
-                                 api_key_env="AITHON_TEST_A2A_KEY"))
+                                 api_key_env="AIYTHON_TEST_A2A_KEY"))
         client_config = factory.await_args.kwargs["client_config"]
         self.assertEqual(client_config.httpx_client.headers["Authorization"], "Bearer private-key")
 
@@ -588,7 +598,7 @@ class AsyncProviderTests(unittest.IsolatedAsyncioTestCase):
         config = ResolvedConfig(None, Path.cwd(), providers={"route": {"model": "openai/test"}})
         sdk = SimpleNamespace(acompletion=AsyncMock(return_value={"choices": [{"message": {
             "role": "assistant", "content": None, "tool_calls": []}}]}))
-        with patch("aithon.providers.sdk", return_value=sdk):
+        with patch("aiython.providers.sdk", return_value=sdk):
             result = await LiteLLMProvider(config, profile).acomplete([{"role": "user", "content": "hi"}], [])
         self.assertEqual(result["role"], "assistant")
         self.assertEqual(sdk.acompletion.await_count, 1)

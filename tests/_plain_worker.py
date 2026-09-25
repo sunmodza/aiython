@@ -1,6 +1,6 @@
 """Importable worker that needs no model or configuration dependencies."""
 
-from aithon import join
+from aiython import join
 
 
 def send(ticket):

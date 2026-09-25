@@ -1,6 +1,6 @@
 # Declared types are runtime contracts
 
-Aithon checks explicit annotations throughout project code, including ordinary Python. It sends the same contract to the AI as an output schema. No special base class or framework is required.
+Aiython checks explicit annotations throughout project code, including ordinary Python. It sends the same contract to the AI as an output schema. No special base class or framework is required.
 
 ```python
 from typing import Annotated, Literal, TypedDict
@@ -32,20 +32,20 @@ Expected types reach direct AI expressions in annotated assignments, later assig
 
 ## Type forms
 
-Contracts support primitives, `None`, `Any`, unions/Optional, Literal values, Annotated descriptions, nested list/dict/set/frozenset/tuple, concrete Sequence/Mapping values, TypedDict with Required/NotRequired, dataclasses, nominal classes, Self, type parameters, TypeVar constraints, NewType's underlying runtime type, type[T], and recursive/generic Python 3.14 type aliases. Generic class fields are checked after substituting supplied type arguments.
+Contracts support primitives, `None`, `Any`, unions/Optional, Literal values, Annotated descriptions, nested list/dict/set/frozenset/tuple, concrete Sequence/Mapping values, TypedDict with Required/NotRequired, dataclasses, nominal classes, Self, type parameters, TypeVar constraints, NewType's underlying runtime type, type[T], and recursive/generic type aliases on Python 3.12+. Generic class fields are checked after substituting supplied type arguments.
 
 Primitive checks are strict: no string-to-number conversion, and bool does not pass an int contract. `Any` is an explicit escape from value checking. Bare containers have unconstrained elements. `Final` bindings reject reassignment; `ClassVar` direct writes must target the class.
 
-Annotations are interpreted rather than passed to eval. Aithon uses Python 3.14 string-format annotation introspection and resolves names in their execution/definition scopes. Custom annotation machinery and custom validators are trusted Python code, not sandboxed code.
+Annotations are interpreted rather than passed to `eval`. On Python 3.14+, Aiython uses string-format annotation introspection; on 3.11–3.13, it reads stored annotations without evaluating strings. Type aliases on 3.12–3.13 use Python's lazy alias value machinery, which can evaluate code supplied by the alias author. Custom annotation machinery and custom validators are trusted Python code, not sandboxed code.
 
-`aithon.type_constraints.register_validator(Class, validator)` supplies a custom runtime predicate. A class validator returns true for a valid value. It can also provide the structural check for a Protocol that Aithon cannot prove automatically.
+`aiython.type_constraints.register_validator(Class, validator)` supplies a custom runtime predicate. A class validator returns true for a valid value. It can also provide the structural check for a Protocol that Aiython cannot prove automatically.
 
 ## Limits are explicit
 
 Runtime checking is not a complete static type proof. Unsupported annotations fail with `UnsupportedType`; they are not silently reduced to `Any`. In particular, Callable signatures, ParamSpec/TypeVarTuple, unregistered Protocols, LiteralString provenance, ReadOnly mutation contracts and arbitrary annotation calls are not automatically proven. Lazy iterator objects supplied by other code are not consumed or wrapped merely to guess their element type; use a typed generator function to check values as they pass yield/send boundaries.
 
-Python object identity and side effects are preserved. A failed mutation check does **not** roll back `append`, an external API call, a property setter, or arbitrary native code. Foreign code/threads are not instrumented internally; Aithon checks its own boundaries. Objects can be temporarily invalid before the next boundary check. For a guarantee that invalid values can never enter an object, a different object model or isolation boundary is needed.
+Python object identity and side effects are preserved. A failed mutation check does **not** roll back `append`, an external API call, a property setter, or arbitrary native code. Foreign code/threads are not instrumented internally; Aiython checks its own boundaries. Objects can be temporarily invalid before the next boundary check. For a guarantee that invalid values can never enter an object, a different object model or isolation boundary is needed.
 
-`TypeViolation` and `UnsupportedType` are TypeError subclasses and Aithon contract errors. Ordinary Python contract failures stop without asking AI to reinterpret the declared type. Errors identify the value path (for example `analysis['severity']`) and uncaught errors include the project filename/line.
+`TypeViolation` and `UnsupportedType` are TypeError subclasses and Aiython contract errors. Ordinary Python contract failures stop without asking AI to reinterpret the declared type. Errors identify the value path (for example `analysis['severity']`) and uncaught errors include the project filename/line.
 
 See [the typed result example](../examples/recipes/01_typed_result.py) and [the type safety tests](../tests/test_type_safety.py).

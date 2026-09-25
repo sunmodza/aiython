@@ -1,9 +1,9 @@
-"""Run with: uv run aithon examples/collaboration/parallel_demo.py"""
+"""Run with: uv run aiython examples/collaboration/parallel_demo.py"""
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
-from aithon import group, worker_entry
+from aiython import group, worker_entry
 
 
 if __name__ == "__main__":

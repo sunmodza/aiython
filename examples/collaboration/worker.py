@@ -1,5 +1,5 @@
 """Importable worker for the parallel collaboration example."""
-from aithon import join
+from aiython import join
 
 
 def process_item(ticket, item):

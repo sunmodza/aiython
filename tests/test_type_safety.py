@@ -2,12 +2,13 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 from unittest.mock import Mock
 
-from aithon.agent import ToolAgent
-from aithon.cli import run_script
-from aithon.models import ProfileConfig, ResolvedConfig
-from aithon.type_constraints import TypeViolation, UnsupportedType, describe_output, validate_output
+from aiython.agent import ToolAgent
+from aiython.cli import run_script
+from aiython.models import ProfileConfig, ResolvedConfig
+from aiython.type_constraints import TypeViolation, UnsupportedType, describe_output, validate_output
 
 
 class TypeSafetyTests(unittest.TestCase):
@@ -39,7 +40,7 @@ class TypeSafetyTests(unittest.TestCase):
             self.run_source('x: int = 1\ndef work():\n    global x\n    x = "bad"\nwork()')
 
     def test_class_attribute_checked_before_write(self):
-        result = self.run_source('''from aithon.type_constraints import TypeViolation
+        result = self.run_source('''from aiython.type_constraints import TypeViolation
 class Person:
     age: int
     def __init__(self):
@@ -71,6 +72,7 @@ def broken(x: T) -> T:
 broken(1)
 ''')
 
+    @unittest.skipIf(sys.version_info < (3, 12), "The type statement requires Python 3.12")
     def test_forward_local_alias_is_captured(self):
         self.assertEqual(self.run_source('''def factory():
     type Number = int
@@ -84,6 +86,7 @@ answer = factory()(3)
         with self.assertRaises(TypeViolation): self.run_source('from typing import Final\nx: Final[int] = 1\nx = 2')
         with self.assertRaises(TypeViolation): self.run_source('x: int = 1\nfor x in ["bad"]:\n    pass')
 
+    @unittest.skipIf(sys.version_info < (3, 12), "The type statement requires Python 3.12")
     def test_recursive_alias_and_generic_alias(self):
         namespace = {}
         exec('type Tree = int | list[Tree]\ntype Box[T] = list[T]',namespace)
@@ -243,7 +246,7 @@ item = Item('bad')
 ''')
 
     def test_typed_natural_language_keeps_subscript_inside_statement(self):
-        from aithon.frontend import parse
+        from aiython.frontend import parse
         unit = parse('analysis: TicketAnalysis = analyze the ticket from ticket["message"]\n','test.py')
         block = next(iter(unit.blocks.values()))
         self.assertEqual(block.output_type,'TicketAnalysis')
@@ -290,6 +293,7 @@ other = choose(1)
         result = self.run_source('x: int = choose a number; answer = x + 1',Agent())
         self.assertEqual(result['answer'],5)
 
+    @unittest.skipIf(sys.version_info < (3, 12), "PEP 695 syntax requires Python 3.12")
     def test_pep695_generic_class_and_function(self):
         with self.assertRaises(TypeViolation):
             self.run_source('''class Box[T]:

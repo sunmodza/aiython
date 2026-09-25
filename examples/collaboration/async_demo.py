@@ -1,7 +1,7 @@
-"""Run with: uv run aithon examples/collaboration/async_demo.py"""
+"""Run with: uv run aiython examples/collaboration/async_demo.py"""
 import asyncio
 
-from aithon import group, join
+from aiython import group, join
 
 
 async def worker(ticket):

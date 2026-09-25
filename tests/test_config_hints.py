@@ -7,11 +7,11 @@ import tomllib
 import unittest
 from unittest.mock import Mock
 
-from aithon.agent import ToolAgent
-from aithon.capabilities import CapabilityRuntime
-from aithon.cli import run_script
-from aithon.config import resolve
-from aithon.models import ConfigError, ProviderError, ResolvedConfig
+from aiython.agent import ToolAgent
+from aiython.capabilities import CapabilityRuntime
+from aiython.cli import run_script
+from aiython.config import resolve
+from aiython.models import ConfigError, ProviderError, ResolvedConfig
 
 
 class ConfigHintTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class ConfigHintTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.path = self.root / 'aithon.toml'
+        self.path = self.root / 'aiython.toml'
         self.path.write_text('version=3\nmodel="openai/test"\n')
         self.script = self.root / 'main.py'
         self.script.write_text('speech = speak the answer aloud\n')
@@ -32,22 +32,22 @@ class ConfigHintTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stderr(output):
             for _ in range(2):
-                with self.assertRaisesRegex(ConfigError, 'aithon setup --capability speech_to_text'):
+                with self.assertRaisesRegex(ConfigError, 'aiython setup --capability speech_to_text'):
                     runtime.routes(profile, 'speech_to_text')
         updated = self.path.read_text()
         self.assertTrue(updated.startswith(original))
-        self.assertEqual(updated.count('# >>> Aithon missing route:'), 1)
+        self.assertEqual(updated.count('# >>> Aiython missing route:'), 1)
         self.assertIn('# [capabilities]', updated)
         self.assertIn('# speech_to_text = "openai/YOUR_TRANSCRIPTION_MODEL"', updated)
         self.assertEqual(tomllib.loads(updated)['model'], 'openai/test')
         self.assertEqual(output.getvalue().count('added commented'), 1)
-        self.assertIn('aithon setup --capability speech_to_text', output.getvalue())
+        self.assertIn('aiython setup --capability speech_to_text', output.getvalue())
 
     def test_profile_hint_uses_profile_table(self):
         self.path.write_text(self.path.read_text() + '[profiles.fast]\nmodel="openai/fast"\n')
         config = resolve(self.script)
         with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(ConfigError, 'aithon setup --capability image_generation --profile fast'):
+            with self.assertRaisesRegex(ConfigError, 'aiython setup --capability image_generation --profile fast'):
                 CapabilityRuntime(config).routes(config.profiles['fast'], 'image_generation')
         self.assertIn('# [profiles."fast".capabilities]', self.path.read_text())
 
@@ -59,7 +59,7 @@ class ConfigHintTests(unittest.TestCase):
                 'outcome': {'kind': 'error', 'reason': 'No text_to_speech route is configured',
                             'missing_capability': 'text_to_speech'}})}}]}
         with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(ProviderError, 'aithon setup --capability text_to_speech'):
+            with self.assertRaisesRegex(ProviderError, 'aiython setup --capability text_to_speech'):
                 run_script(self.script, config=config, agent_factory=lambda _: ToolAgent(provider))
         self.assertEqual(provider.complete.call_count, 1)
         self.assertIn('# text_to_speech = ', self.path.read_text())

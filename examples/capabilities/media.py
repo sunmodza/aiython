@@ -1,7 +1,7 @@
 # The sample audio, image, and video are bundled beside this script.
 # Running the full example requires version 3 routes for speech_to_text,
 # text_to_speech, vision, image_generation, image_editing, and video.
-# See aithon.toml.example for the required profile structure.
+# See aiython.toml.example for the required profile structure.
 from pathlib import Path
 
 ASSETS = Path(__file__).resolve().parent
