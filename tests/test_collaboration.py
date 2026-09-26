@@ -116,9 +116,11 @@ class CollaborationTests(unittest.TestCase):
             (root / "main.py").write_text(
                 'from concurrent.futures import ProcessPoolExecutor\n'
                 'from multiprocessing import get_all_start_methods, get_context\n'
+                'from pathlib import Path\n'
                 'from aiython import group, worker_entry\n'
                 'if __name__ == "__main__":\n'
                 '    with group() as team:\n'
+                '        assert team.project_root == str(Path(__file__).parent)\n'
                 '        answer = []\n'
                 '        for method in ("spawn", "forkserver"):\n'
                 '            if method not in get_all_start_methods():\n'
