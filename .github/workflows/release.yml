@@ -25,7 +25,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
           version: latest-known
           enable-cache: false
-      - run: uv run --locked --python ${{ matrix.python-version }} --extra a2a python -m unittest discover -s tests -q
+      - name: Test with line and branch coverage
+        env:
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/.coveragerc
+        run: uv run --locked --python ${{ matrix.python-version }} --extra a2a python -m coverage run -m unittest discover -s tests -q
+      - name: Require full coverage before release
+        run: |
+          uv run --locked --python ${{ matrix.python-version }} --extra a2a python -m coverage combine
+          uv run --locked --python ${{ matrix.python-version }} --extra a2a python -m coverage json -o coverage.json
+          uv run --locked --python ${{ matrix.python-version }} python scripts/coverage_summary.py
 
   build:
     runs-on: ubuntu-latest

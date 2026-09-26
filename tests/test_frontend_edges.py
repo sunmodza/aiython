@@ -66,6 +66,8 @@ class FrontendEdgeTests(unittest.TestCase):
                 patch.object(frontend, 'check', side_effect=check), \
                 patch.object(frontend, 'legacy_fstring_candidates', return_value=iter(())):
             self.assertEqual(len(frontend.build().blocks), 1)
+        with patch('aiython.frontend.sys.version_info', (3, 14)):
+            self.assertEqual(len(parse(source).blocks), 1)
 
 
 if __name__ == '__main__':

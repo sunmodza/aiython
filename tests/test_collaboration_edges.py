@@ -1,4 +1,5 @@
 import asyncio
+import concurrent
 from dataclasses import replace
 from io import BytesIO
 import json
@@ -85,19 +86,23 @@ class BrokerEdgeTests(unittest.TestCase):
 
     def test_wait_wakes_when_participant_leaves(self):
         self.request('join')
-        ready = threading.Event()
+        waiting = threading.Event()
         outcome = []
+        condition_wait = self.broker.condition.wait
+        def wait_for_notification(timeout):
+            waiting.set()
+            return condition_wait(timeout)
         def wait():
-            ready.set()
             try:
                 self.request('wait', timeout=2)
             except ValueError as error:
                 outcome.append(str(error))
         thread = threading.Thread(target=wait)
-        thread.start()
-        self.assertTrue(ready.wait(1))
-        self.request('leave')
-        thread.join(2)
+        with patch.object(self.broker.condition, 'wait', side_effect=wait_for_notification):
+            thread.start()
+            self.assertTrue(waiting.wait(1))
+            self.request('leave')
+            thread.join(2)
         self.assertFalse(thread.is_alive())
         self.assertEqual(outcome, ['Group or participant closed while waiting'])
 
@@ -280,6 +285,43 @@ class GroupTransportEdgeTests(unittest.TestCase):
 
 
 class FallbackWorkerEdgeTests(unittest.TestCase):
+    def test_portable_worker_reuses_process_and_recovers_after_crash(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / 'worker.py').write_text('''import os
+def answer(ticket, value):
+    return value + 1
+def fail(ticket):
+    raise ValueError('worker failed')
+def unpickleable(ticket):
+    return lambda value: value
+def crash(ticket):
+    os._exit(17)
+''')
+            try:
+                with c.group(root) as team:
+                    ticket = team.invite('worker')
+                    self.assertEqual(c._subprocess_entry(ticket, 'worker', 'answer', (41,), {}), 42)
+                    self.assertEqual(c._subprocess_entry(ticket, 'worker', 'answer', (1,), {}), 2)
+                    with self.assertRaisesRegex(RuntimeError, 'worker failed'):
+                        c._subprocess_entry(ticket, 'worker', 'fail', (), {})
+                    with self.assertRaisesRegex(RuntimeError, 'PicklingError|AttributeError'):
+                        c._subprocess_entry(ticket, 'worker', 'unpickleable', (), {})
+                    with self.assertRaisesRegex(RuntimeError, 'status 17'):
+                        c._subprocess_entry(ticket, 'worker', 'crash', (), {})
+                    self.assertEqual(c._subprocess_entry(ticket, 'worker', 'answer', (2,), {}), 3)
+            finally:
+                c._close_fallback_workers()
+
+    def test_subinterpreter_dispatch_with_simulated_interpreters(self):
+        fake = SimpleNamespace(get_current=lambda: 1, get_main=lambda: 0)
+        with patch.object(concurrent, 'interpreters', fake, create=True):
+            self.assertTrue(c._is_subinterpreter())
+        ticket = c.Ticket('test', 'worker', 'secret', '127.0.0.1', 1, -1, os.getcwd())
+        with patch.object(c, '_is_subinterpreter', return_value=True), \
+                patch.object(c, '_subprocess_entry', return_value=42) as execute:
+            self.assertEqual(c.worker_entry(ticket, 'worker', 'answer', 41), 42)
+        execute.assert_called_once_with(ticket, 'worker', 'answer', (41,), {})
+
     def test_worker_constructor_cleans_directory_if_process_fails(self):
         directory = SimpleNamespace(cleanup=Mock())
         with patch('tempfile.TemporaryDirectory', return_value=directory), \

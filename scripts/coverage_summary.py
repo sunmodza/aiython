@@ -13,3 +13,5 @@ print(summary)
 if destination := os.environ.get("GITHUB_STEP_SUMMARY"):
     with Path(destination).open("a") as file:
         file.write(f"## Coverage\n\nLine: {line:.2f}%\n\nBranch: {branch:.2f}%\n")
+if totals["missing_lines"] or totals["missing_branches"]:
+    raise SystemExit("Line and branch coverage must both be 100%")

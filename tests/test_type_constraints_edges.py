@@ -5,6 +5,7 @@ import enum
 from pathlib import Path
 import sys
 import types
+from types import SimpleNamespace
 from typing import Any, Annotated, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeVar, TypedDict
 import unittest
 from unittest.mock import patch
@@ -171,10 +172,13 @@ class CompilerEdgeTests(unittest.TestCase):
         compiler = tc.Compiler({'number': 2})
         contract = tc.compile_contract('int', {})
         self.assertIs(compiler.compile(contract), contract)
+        self.assertIs(compiler.value(contract, compiler.names), contract)
         with self.assertRaisesRegex(tc.UnsupportedType, 'module or class'):
             compiler.lookup(ast.parse('number.real', mode='eval').body, compiler.names)
         with self.assertRaisesRegex(tc.UnsupportedType, 'Qualifier requires'):
             compiler.generic(Final, (), 'Final[]', {})
+        with self.assertRaisesRegex(tc.UnsupportedType, 'ReadOnly needs'):
+            tc.compile_contract('ReadOnly[int]', {'ReadOnly': tc.ReadOnly})
         self.assertEqual(compiler.value(Annotated[int, 'note'], compiler.names).description, 'note')
         self.assertEqual(compiler.value(__import__('typing').ForwardRef('int'), compiler.names).kind, 'int')
         with self.assertRaisesRegex(tc.UnsupportedType, 'supported Python type'):
@@ -184,6 +188,20 @@ class CompilerEdgeTests(unittest.TestCase):
         self.assertEqual(tc.ContractCache().compile(int, {}).kind, 'int')
         with self.assertRaisesRegex(tc.UnsupportedType, 'Unsupported generic'):
             compiler.generic(object, (), 'object[]', {})
+
+    def test_annotationlib_access_and_alias_evaluation_when_available(self):
+        fake = SimpleNamespace(
+            Format=SimpleNamespace(STRING='string'),
+            get_annotations=lambda target, format: {'value': 'int'},
+            call_evaluate_function=lambda function, format: int,
+        )
+        class Sample:
+            value: int
+        alias = SimpleNamespace(__type_params__=(), __name__='Alias',
+                                evaluate_value=lambda: int)
+        with patch.object(tc, 'annotationlib', fake):
+            self.assertEqual(tc.annotations_of(Sample), {'value': 'int'})
+            self.assertEqual(tc.Compiler({}).alias(alias, {}).args[0].kind, 'int')
 
     def test_compiler_rejects_unsafe_and_unresolved_annotations(self):
         cases = [
