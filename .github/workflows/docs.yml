@@ -32,4 +32,5 @@ jobs:
         with:
           python-version: "3.11"
           version: latest-known
+          enable-cache: false
       - run: uv run --locked zensical build --clean --strict
