@@ -48,4 +48,4 @@ Python object identity and side effects are preserved. A failed mutation check d
 
 `TypeViolation` and `UnsupportedType` are TypeError subclasses and Aiython contract errors. Ordinary Python contract failures stop without asking AI to reinterpret the declared type. Errors identify the value path (for example `analysis['severity']`) and uncaught errors include the project filename/line.
 
-See [the typed result example](../examples/recipes/01_typed_result.py) and [the type safety tests](../tests/test_type_safety.py).
+See [the typed result example](https://github.com/sunmodza/aiython/blob/main/examples/recipes/01_typed_result.py) and [the type safety tests](https://github.com/sunmodza/aiython/blob/main/tests/test_type_safety.py).

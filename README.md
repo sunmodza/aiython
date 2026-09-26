@@ -4,6 +4,8 @@
 
 <p align="center"><strong>When Python doesn’t know what to do, Aiython does.</strong></p>
 
+<p align="center"><a href="docs/index.md">Documentation</a> · <a href="examples/recipes/README.md">Examples</a></p>
+
 Aiython runs Python normally and can bring in AI when Python cannot parse the source or continue execution. AI works with the live program state; Python keeps control of execution.
 
 ## See the difference

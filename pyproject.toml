@@ -47,3 +47,8 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "aiython"
+
+[dependency-groups]
+dev = [
+    "zensical>=0.0.65",
+]

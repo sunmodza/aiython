@@ -26,6 +26,11 @@ The default test suite mocks provider calls and requires no API key. Use
 provider or capability, add an offline contract test for its request, response,
 and error behavior; live API checks are optional and may incur charges.
 
+The documentation website uses the Markdown files in `docs/`. Preview it with
+`uv run zensical serve` and check the production build with
+`uv run zensical build --clean --strict`. Keep links to files outside `docs/` as
+GitHub URLs so they also work on the published site.
+
 ## Submit a change
 
 Keep a pull request focused and describe the user-visible behavior, why it

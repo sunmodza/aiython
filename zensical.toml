@@ -1,0 +1,45 @@
+[project]
+site_name = "Aiython"
+site_description = "Run Python normally and bring in AI at the current statement."
+repo_url = "https://github.com/sunmodza/aiython"
+edit_uri = "edit/main/docs/"
+docs_dir = "docs"
+site_dir = "site"
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = "getting-started.md" },
+  { "Examples" = "examples.md" },
+  { "Guides" = [
+    { "Configuration" = "configuration.md" },
+    { "Runtime" = "runtime.md" },
+    { "Type safety" = "type-safety.md" },
+    { "Capabilities" = "capabilities.md" },
+    { "Collaboration" = "collaboration.md" },
+    { "Measuring performance" = "performance-evaluation.md" },
+  ] },
+]
+
+[project.theme]
+logo = "assets/icon.png"
+favicon = "assets/icon.png"
+features = [
+  "content.action.edit",
+  "content.code.copy",
+  "navigation.sections",
+  "navigation.top",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
