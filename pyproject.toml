@@ -28,6 +28,11 @@ dependencies = [
     "typing-extensions>=4.15,<5",
 ]
 
+[project.urls]
+Homepage = "https://github.com/sunmodza/aiython"
+Repository = "https://github.com/sunmodza/aiython"
+Issues = "https://github.com/sunmodza/aiython/issues"
+
 [project.scripts]
 aiython = "aiython:main"
 
