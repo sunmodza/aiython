@@ -8,34 +8,41 @@ Aiython runs Python normally and can bring in AI when Python cannot parse the so
 
 ## See the difference
 
+![Animated walkthrough: Python routes both tickets through AI classification, then Aiython summarizes the completed queues once after the loop.](assets/readme/runtime-debug.gif)
+
+
 ```python
 from typing import Literal
 
-inbox = ["Upload crashes", "Invoice please"]
+tickets = [
+    "After uploading a PDF, the ticket page freezes until I refresh the browser.",
+    "Could you email last month's invoice and update the billing contact for our team?",
+]
 queues = {"bug": [], "billing": []}
 
-for message in inbox:
-    kind: Literal["bug", "billing"] = classify this message
-    queues[kind].append(message)
+for ticket in tickets:
+    kind: Literal["bug", "billing"] = classify this ticket
+    queues[kind].append(ticket)
 
-print(queues)
+summary = summarize the routed tickets in one sentence
+print(queues, summary)
 ```
 
-![Animated source-to-model walkthrough: Aiython marks the expression, Python reaches it, the AI runtime builds context, a model optionally reads the live message and returns a value, and Python resumes.](assets/readme/runtime-debug.gif)
 
-Python reaches `classify this message` with the current `message`. Aiython invokes AI, checks the result against `Literal["bug", "billing"]`, and resumes the loop. The animation shows one possible tool path; calls and answers can vary. Try the runnable [loop example](examples/recipes/03_loop.py).
 
-Here, `classify this message` is the part Python cannot parse. Run the file with `aiython`.
+AI classifies each ticket while Python runs the loop. After the loop, one AI call summarizes the routed tickets. The animation shows both classifications and the final summary. Copy or run the [loop example](examples/recipes/03_loop.py).
+
+The red-underlined expressions are invalid in plain Python; Aiython handles them when the file runs.
 
 ## Get started
 
-Use CPython **3.11 or newer**. Save the example above as `inbox.py`. Once the first PyPI release is available, install the standalone command with [uv](https://docs.astral.sh/uv/):
+Use CPython **3.11 or newer**. Save the example above as `tickets.py`, then install the standalone command with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install aiython
 aiython setup
-aiython --explain inbox.py
-aiython inbox.py
+aiython --explain tickets.py
+aiython tickets.py
 ```
 
 `--explain` shows the AI boundary without running the script or calling a model. `setup` lets you search for a tool-capable model and stores an entered key in a gitignored project file. The last command uses your provider and may incur charges. The PyPI distribution, CLI, and Python import all use **`aiython`**.
@@ -47,15 +54,6 @@ aiython inbox.py
 | Standalone command | `uv tool install aiython` | `aiython ...` |
 
 Use a project environment when your script imports other project dependencies; a uv tool has its own isolated environment. [Setup and configuration](docs/configuration.md) covers profiles, custom endpoints, and capability routes.
-
-Until the PyPI release, run from this source checkout:
-
-```bash
-uv sync
-uv run aiython setup
-uv run aiython --explain examples/recipes/03_loop.py
-uv run aiython examples/recipes/03_loop.py
-```
 
 Ordinary Python runs without loading LiteLLM or contacting a provider. Reasoning calls use the [LiteLLM Python SDK](https://docs.litellm.ai/docs/) in process; no proxy service is needed.
 

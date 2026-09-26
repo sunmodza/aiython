@@ -1,12 +1,16 @@
-"""Python routes each message; AI classifies only the current one."""
+"""Python routes each ticket; AI summarizes the completed queues once."""
 from typing import Literal
 
 
-inbox = ["Upload crashes", "Invoice please"]
+tickets = [
+    "After uploading a PDF, the ticket page freezes until I refresh the browser.",
+    "Could you email last month's invoice and update the billing contact for our team?",
+]
 queues = {"bug": [], "billing": []}
 
-for message in inbox:
-    kind: Literal["bug", "billing"] = classify this message
-    queues[kind].append(message)
+for ticket in tickets:
+    kind: Literal["bug", "billing"] = classify this ticket
+    queues[kind].append(ticket)
 
-print(queues)
+summary = summarize the routed tickets in one sentence
+print(queues, summary)

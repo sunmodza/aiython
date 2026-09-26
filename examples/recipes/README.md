@@ -19,7 +19,7 @@ uv run aiython --stats examples/recipes/01_typed_result.py
 | --- | --- |
 | `01_typed_result.py` | Return a `TypedDict` with a checked `Literal` field. |
 | `02_update_state.py` | Mutate existing objects through a standalone AI statement. |
-| `03_loop.py` | Run one AI statement for each Python loop iteration. |
+| `03_loop.py` | Classify tickets in a Python loop, then summarize the queues once. |
 | `04_recovery.py` | Recover from an intentional `KeyError` at a checkpoint. |
 | `05_existing_object.py` | Select an existing dataclass instance without copying it. |
 | `06_python_first.py` | Compute Fibonacci in Python, then ask AI for an explanation. |

@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1560" height="620" viewBox="0 0 1560 620" role="img" aria-labelledby="title description">
-<title id="title">How Aiython hands a Python expression to an AI model</title>
-<desc id="description">The frontend marks and transforms the red-underlined expression in memory. Python executes to that line, where the AI runtime builds a request from the statement, nearby source, object metadata and output type. In this example the model reads the live message with a tool, returns bug, the runtime checks the type, and Python resumes to update its queue.</desc>
+<title id="title">How Aiython routes two tickets and summarizes the queues</title>
+<desc id="description">The frontend marks two red-underlined expressions in memory. Python routes the first ticket to bug and the second to billing, making one classification call per loop iteration. After the loop, one AI call summarizes the completed queues. Python prints both queues and the summary.</desc>
 <rect x="0" y="0" width="1560" height="620" rx="24" fill="#0b1726" stroke="none" stroke-width="1"/>
-<text x="40" y="57" text-anchor="start" fill="#eef6ff" font-family="DejaVu Sans, Arial, sans-serif" font-size="31" font-weight="700">One expression: source → context → model → Python</text>
-<text x="40" y="91" text-anchor="start" fill="#b9cfdf" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400">Arrow = current line. Red squiggle = invalid in plain Python. Lit box = current phase.</text>
+<text x="40" y="57" text-anchor="start" fill="#eef6ff" font-family="DejaVu Sans, Arial, sans-serif" font-size="31" font-weight="700">Two tickets → two classifications → one summary</text>
+<text x="40" y="91" text-anchor="start" fill="#b9cfdf" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400">Arrow = current line. Red squiggles = invalid in plain Python. Lit box = current phase.</text>
 <rect x="40" y="116" width="830" height="452" rx="19" fill="#142334" stroke="#405a70" stroke-width="2"/>
 <rect x="40" y="116" width="830" height="49" rx="18" fill="#1b3045" stroke="none" stroke-width="1"/>
 <rect x="40" y="150" width="830" height="15" rx="0" fill="#1b3045" stroke="none" stroke-width="1"/>
@@ -13,19 +13,22 @@
 <text x="130" y="148" text-anchor="start" fill="#eef6ff" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="700">03_loop.py</text>
 <text x="838" y="147" text-anchor="end" fill="#a6c0d2" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="400">SOURCE VIEW</text>
 <rect x="57" y="172" width="796" height="334" rx="11" fill="#0f1d2d" stroke="none" stroke-width="1"/>
-<text x="119" y="223" text-anchor="end" fill="#7894a8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">8</text>
-<text x="145" y="223" text-anchor="start" fill="#bdccda" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="400">for message in inbox:</text>
-<text x="119" y="285" text-anchor="end" fill="#7894a8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">9</text>
-<text x="191" y="285" text-anchor="start" fill="#bdccda" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="400">kind: Literal["bug", "billing"] = classify this message</text>
-<path d="M580 295 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0" fill="none" stroke="#ff6e78" stroke-width="2.8" stroke-linecap="round"/>
-<rect x="65" y="312" width="779" height="51" rx="8" fill="#193c34" stroke="#77dfb8" stroke-width="2"/>
-<path d="M76 328l13 9-13 9z" fill="#77dfb8"/>
-<text x="119" y="347" text-anchor="end" fill="#77dfb8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">10</text>
-<text x="191" y="347" text-anchor="start" fill="#ffffff" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="700">queues[kind].append(message)</text>
-<text x="119" y="409" text-anchor="end" fill="#7894a8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">12</text>
-<text x="145" y="409" text-anchor="start" fill="#bdccda" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="400">print(queues)</text>
-<text x="65" y="543" text-anchor="start" fill="#77dfb8" font-family="DejaVu Sans Mono, monospace" font-size="17" font-weight="700">LINE 10</text>
-<text x="228" y="543" text-anchor="start" fill="#c4d7e6" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400">Python running again</text>
+<text x="119" y="216" text-anchor="end" fill="#7894a8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">11</text>
+<text x="145" y="216" text-anchor="start" fill="#bdccda" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="400">for ticket in tickets:</text>
+<text x="119" y="272" text-anchor="end" fill="#7894a8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">12</text>
+<text x="191" y="272" text-anchor="start" fill="#bdccda" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="400">kind: Literal["bug", "billing"] = classify this ticket</text>
+<path d="M580 282 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q1.25 -5 2.5 0 q1.25 5 2.5 0" fill="none" stroke="#ff6e78" stroke-width="2.8" stroke-linecap="round"/>
+<text x="119" y="328" text-anchor="end" fill="#7894a8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">13</text>
+<text x="191" y="328" text-anchor="start" fill="#bdccda" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="400">queues[kind].append(ticket)</text>
+<text x="119" y="384" text-anchor="end" fill="#7894a8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">15</text>
+<text x="145" y="384" text-anchor="start" fill="#bdccda" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="400">summary = summarize the routed tickets in one sentence</text>
+<path d="M259 394 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q4 -5 8 0 q4 5 8 0 q1.75 -5 3.5 0 q1.75 5 3.5 0" fill="none" stroke="#ff6e78" stroke-width="2.8" stroke-linecap="round"/>
+<rect x="65" y="405" width="779" height="51" rx="8" fill="#193c34" stroke="#77dfb8" stroke-width="2"/>
+<path d="M76 421l13 9-13 9z" fill="#77dfb8"/>
+<text x="119" y="440" text-anchor="end" fill="#77dfb8" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">16</text>
+<text x="145" y="440" text-anchor="start" fill="#ffffff" font-family="DejaVu Sans Mono, monospace" font-size="19" font-weight="700">print(queues, summary)</text>
+<text x="65" y="543" text-anchor="start" fill="#77dfb8" font-family="DejaVu Sans Mono, monospace" font-size="17" font-weight="700">LINE 16</text>
+<text x="228" y="543" text-anchor="start" fill="#c4d7e6" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400">Python prints the final result</text>
 <rect x="900" y="116" width="620" height="452" rx="19" fill="#142334" stroke="#405a70" stroke-width="2"/>
 <text x="925" y="151" text-anchor="start" fill="#eef6ff" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="700">Execution path</text>
 <rect x="1352" y="128" width="143" height="34" rx="9" fill="#1d3042" stroke="#77dfb8" stroke-width="2"/>
@@ -35,22 +38,22 @@
 <text x="987" y="221" text-anchor="middle" fill="#8da4b7" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="400">mark AI span</text>
 <rect x="1068" y="177" width="125" height="57" rx="11" fill="#1d2a39" stroke="#486075" stroke-width="2"/>
 <text x="1130" y="202" text-anchor="middle" fill="#b4c8d7" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="700">PYTHON</text>
-<text x="1130" y="221" text-anchor="middle" fill="#8da4b7" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="400">run loop</text>
+<text x="1130" y="221" text-anchor="middle" fill="#8da4b7" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="400">run script</text>
 <rect x="1211" y="177" width="125" height="57" rx="11" fill="#1d2a39" stroke="#486075" stroke-width="2"/>
 <text x="1273" y="202" text-anchor="middle" fill="#b4c8d7" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="700">AI RUNTIME</text>
 <text x="1273" y="221" text-anchor="middle" fill="#8da4b7" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="400">context + model</text>
 <rect x="1354" y="177" width="142" height="57" rx="11" fill="#193c34" stroke="#77dfb8" stroke-width="2"/>
 <text x="1425" y="202" text-anchor="middle" fill="#77dfb8" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="700">PYTHON</text>
-<text x="1425" y="221" text-anchor="middle" fill="#e1ebf3" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="400">resume loop</text>
+<text x="1425" y="221" text-anchor="middle" fill="#e1ebf3" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="400">resume script</text>
 <text x="1059" y="211" text-anchor="middle" fill="#617e91" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="700">→</text>
 <text x="1202" y="211" text-anchor="middle" fill="#617e91" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="700">→</text>
 <text x="1345" y="211" text-anchor="middle" fill="#77dfb8" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="700">→</text>
 <rect x="924" y="255" width="572" height="293" rx="13" fill="#0d1b29" stroke="#77dfb8" stroke-width="2"/>
-<text x="946" y="289" text-anchor="start" fill="#77dfb8" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="700">08 / RETURN TO PYTHON MODE</text>
-<text x="946" y="325" text-anchor="start" fill="#eef6ff" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="700">Resume and run the next line</text>
+<text x="946" y="289" text-anchor="start" fill="#77dfb8" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="700">13 / PYTHON</text>
+<text x="946" y="325" text-anchor="start" fill="#eef6ff" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="700">Print the queues and summary</text>
 <rect x="945" y="344" width="529" height="151" rx="8" fill="#172a3a" stroke="none" stroke-width="1"/>
-<text x="961" y="390" text-anchor="start" fill="#ffffff" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">kind = "bug"</text>
-<text x="961" y="422" text-anchor="start" fill="#ffffff" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">queues["bug"] = ["Upload crashes"]</text>
-<text x="946" y="527" text-anchor="start" fill="#c4d8e7" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400">Python performs the append, then continues the loop.</text>
-<text x="40" y="602" text-anchor="start" fill="#b9cfdf" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400">Illustrative path for one loop iteration. Model tool use may vary.</text>
+<text x="961" y="390" text-anchor="start" fill="#ffffff" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">queues: bug=1, billing=1</text>
+<text x="961" y="422" text-anchor="start" fill="#ffffff" font-family="DejaVu Sans Mono, monospace" font-size="18" font-weight="400">summary: "One bug and one billing request."</text>
+<text x="946" y="527" text-anchor="start" fill="#c4d8e7" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400">Python finishes the script with both results.</text>
+<text x="40" y="602" text-anchor="start" fill="#b9cfdf" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" font-weight="400">Illustrative model results. Python owns the loop and prints the final output.</text>
 </svg>

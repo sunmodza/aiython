@@ -23,51 +23,84 @@ GREEN = "#77dfb8"
 CODE_FONT_SIZE = 19
 CODE_ADVANCE = CODE_FONT_SIZE * 0.602  # DejaVu Sans Mono glyph width.
 CODE_LINES = (
-    (8, "for message in inbox:"),
-    (9, '    kind: Literal["bug", "billing"] = classify this message'),
-    (10, "    queues[kind].append(message)"),
-    (12, "print(queues)"),
+    (11, "for ticket in tickets:"),
+    (12, '    kind: Literal["bug", "billing"] = classify this ticket'),
+    (13, "    queues[kind].append(ticket)"),
+    (15, "summary = summarize the routed tickets in one sentence"),
+    (16, "print(queues, summary)"),
 )
-OWNER = {1: "frontend", 2: "python", 3: "runtime", 4: "runtime",
-         5: "model", 6: "model", 7: "runtime", 8: "python"}
-CURRENT_LINE = {1: 9, 2: 8, 3: 9, 4: 9, 5: 9, 6: 9, 7: 9, 8: 10}
-ACCENT = {1: VIOLET, 2: BLUE, 3: AMBER, 4: AMBER,
-          5: PINK, 6: PINK, 7: AMBER, 8: GREEN}
+AI_EXPRESSIONS = {
+    12: ('kind: Literal["bug", "billing"] = ', 'classify this ticket'),
+    15: ('summary = ', 'summarize the routed tickets in one sentence'),
+}
+OWNER = {1: "frontend", 2: "python", 3: "runtime", 4: "model",
+         5: "python", 6: "python", 7: "runtime", 8: "model",
+         9: "python", 10: "python", 11: "runtime", 12: "model", 13: "python"}
+CURRENT_LINE = {1: 12, 2: 11, 3: 12, 4: 12, 5: 13, 6: 11,
+                7: 12, 8: 12, 9: 13, 10: 15, 11: 15, 12: 15, 13: 16}
+ACCENT = {stage: (VIOLET if owner == "frontend" else AMBER if owner == "runtime"
+                  else PINK if owner == "model" else GREEN if stage in (5, 9, 13) else BLUE)
+          for stage, owner in OWNER.items()}
 SCENES = {
-    1: ("01 / BEFORE EXECUTION", "Mark the AI expression",
-        ("source  : classify this message",
-         "compiled: __aiython_runtime__.execute(...)",
-         "scope   : only the red-underlined span"),
+    1: ("01 / BEFORE EXECUTION", "Mark both AI expressions",
+        ("inside loop: classify this ticket",
+         "after loop : summarize routed tickets",
+         "scope      : two red-underlined spans"),
         "Aiython transforms an in-memory copy of the source."),
-    2: ("02 / PYTHON", "Run the loop normally",
-        ('message = "Upload crashes"', 'queues["bug"] = []'),
-        "Python picks this item; no model is needed yet."),
-    3: ("03 / ENTER AI MODE", "Pause at the generated call",
-        ("line 9: __aiython_runtime__.execute(...)",),
-        "Python waits here for one value for kind."),
-    4: ("04 / AI RUNTIME", "Build context for this invocation",
-        ("statement: classify this message",
-         "source   : nearby Python lines",
-         "binding  : message (str handle)",
+    2: ("02 / PYTHON", "Pick the first ticket",
+        ('ticket = tickets[0]', 'preview: "PDF upload freezes..."'),
+        "The loop selects the ticket before AI is called."),
+    3: ("03 / AI RUNTIME", "Classify the first ticket",
+        ('statement: classify this ticket',
+         'binding  : ticket (str handle)',
          'expected : Literal["bug", "billing"]'),
-        "The live value can be read through a tool."),
-    5: ("05 / MODEL TOOL (EXAMPLE)", "Read the live binding",
-        ('get_binding(name="message")',
-         'tool result.value: "Upload crashes"'),
-        "This tool step is optional; the frame remains live."),
-    6: ("06 / MODEL RESULT (EXAMPLE)", "Return a candidate value",
-        ('finish(outcome={"kind":"literal",',
-         '                "value":"bug"})'),
-        "The model answers for this invocation only."),
-    7: ("07 / AI RUNTIME", "Validate the declared result type",
-        ('returned: "bug"',
-         'contract: Literal["bug", "billing"]',
-         "check   : passed"),
-        "An invalid value cannot be assigned to kind."),
-    8: ("08 / RETURN TO PYTHON MODE", "Resume and run the next line",
+        "Only the current ticket is in this invocation."),
+    4: ("04 / MODEL RESULT", "Return bug for ticket 1",
+        ('get_binding(name="ticket")',
+         'finish(... "bug")',
+         'Literal contract: passed'),
+        "The model answers once for the current ticket."),
+    5: ("05 / PYTHON", "Append the first ticket",
         ('kind = "bug"',
-         'queues["bug"] = ["Upload crashes"]'),
-        "Python performs the append, then continues the loop."),
+         'queues["bug"] = [tickets[0]]'),
+        "Python performs the append, then loops again."),
+    6: ("06 / PYTHON", "Pick the second ticket",
+        ('ticket = tickets[1]', 'preview: "Invoice and billing contact..."'),
+        "The loop reaches the same AI expression again."),
+    7: ("07 / AI RUNTIME", "Classify the second ticket",
+        ('statement: classify this ticket',
+         'binding  : ticket (new live value)',
+         'expected : Literal["bug", "billing"]'),
+        "This is a new invocation for this iteration."),
+    8: ("08 / MODEL RESULT", "Return billing for ticket 2",
+        ('get_binding(name="ticket")',
+         'finish(... "billing")',
+         'Literal contract: passed'),
+        "The second result selects the billing queue."),
+    9: ("09 / PYTHON", "Append the second ticket",
+        ('kind = "billing"',
+         'queues["billing"] = [tickets[1]]'),
+        "Both tickets are now routed; the loop ends."),
+    10: ("10 / PYTHON", "Move past the loop",
+         ('bug queue    : 1 ticket',
+          'billing queue: 1 ticket',
+          'next line    : summary = ...'),
+         "The summary expression runs once after the loop."),
+    11: ("11 / AI RUNTIME", "Build the summary context",
+         ('statement: summarize the routed tickets',
+          '           in one sentence',
+          'binding  : queues (two populated lists)',
+          'output   : no declared type'),
+         "AI can inspect the completed queues in the live frame."),
+    12: ("12 / MODEL RESULT", "Return one overall summary",
+         ('get_binding(name="queues")',
+          'finish(outcome={"kind":"literal",',
+          '  "value":"One bug and one billing request."})'),
+         "This call runs once, after both classifications."),
+    13: ("13 / PYTHON", "Print the queues and summary",
+         ('queues: bug=1, billing=1',
+          'summary: "One bug and one billing request."'),
+         "Python finishes the script with both results."),
 }
 
 
@@ -91,19 +124,20 @@ def box(x: int, y: int, width: int, height: int, *, fill: str,
     )
 
 
-def ai_squiggle(baseline: int, code_x: int) -> str:
-    """Underline exactly the natural-language expression in the rendered code."""
-    prefix = 'kind: Literal["bug", "billing"] = '
-    expression = "classify this message"
-    start = round(code_x + len(prefix) * CODE_ADVANCE)
-    end = round(start + len(expression) * CODE_ADVANCE)
-    y = baseline + 10
+def red_squiggle(start: int, end: int, y: int) -> str:
     path = f"M{start} {y}"
     for x in range(start, end, 16):
         step = min(16, end - x)
         half = step / 2
         path += f" q{step / 4:g} -5 {half:g} 0 q{step / 4:g} 5 {half:g} 0"
     return f'<path d="{path}" fill="none" stroke="#ff6e78" stroke-width="2.8" stroke-linecap="round"/>'
+
+
+def ai_squiggle(baseline: int, code_x: int, prefix: str, expression: str) -> str:
+    """Underline exactly one expression plain Python cannot parse."""
+    start = round(code_x + len(prefix) * CODE_ADVANCE)
+    end = round(start + len(expression) * CODE_ADVANCE)
+    return red_squiggle(start, end, baseline + 10)
 
 
 def editor(stage: int) -> list[str]:
@@ -113,7 +147,7 @@ def editor(stage: int) -> list[str]:
         "frontend": "#302c48", "python": "#1e3549",
         "runtime": "#3a3020", "model": "#3b293b",
     }[OWNER[stage]]
-    if stage == 8:
+    if stage in (5, 9, 13):
         fill = "#193c34"
     parts = [
         box(40, 116, 830, 452, fill="#142334", stroke="#405a70", radius=19, stroke_width=2),
@@ -128,7 +162,7 @@ def editor(stage: int) -> list[str]:
         box(57, 172, 796, 334, fill="#0f1d2d", radius=11),
     ]
     for index, (line_number, code) in enumerate(CODE_LINES):
-        top = 188 + index * 62
+        top = 181 + index * 56
         baseline = top + 35
         indent = len(code) - len(code.lstrip(" "))
         code_x = 145 + round(indent * CODE_ADVANCE)
@@ -145,18 +179,23 @@ def editor(stage: int) -> list[str]:
                   color="#ffffff" if line_number == current else "#bdccda",
                   mono=True, weight=700 if line_number == current else 400),
         ]
-        if line_number == 9:
-            parts.append(ai_squiggle(baseline, code_x))
+        if line_number in AI_EXPRESSIONS:
+            parts.append(ai_squiggle(baseline, code_x, *AI_EXPRESSIONS[line_number]))
     location = "SOURCE SCAN" if stage == 1 else f"LINE {current}"
     activity = {
         1: "Aiython prepares the code in memory",
-        2: "Python running",
-        3: "Python paused at the AI boundary",
-        4: "Runtime builds model context",
-        5: "Model can read the live frame",
-        6: "Model returns a candidate",
-        7: "Runtime validates the candidate",
-        8: "Python running again",
+        2: "Python selects ticket 1",
+        3: "Runtime builds classification context",
+        4: "AI classifies ticket 1 as bug",
+        5: "Python appends ticket 1",
+        6: "Python selects ticket 2",
+        7: "Runtime builds classification context",
+        8: "AI classifies ticket 2 as billing",
+        9: "Python appends ticket 2",
+        10: "Python exits the loop",
+        11: "Runtime reads the completed queues",
+        12: "AI summarizes both queues once",
+        13: "Python prints the final result",
     }[stage]
     parts += [
         label(65, 543, location, size=17, color=accent, weight=700, mono=True),
@@ -166,14 +205,14 @@ def editor(stage: int) -> list[str]:
 
 
 def execution_path(stage: int) -> list[str]:
-    active = 1 if stage == 1 else 2 if stage == 2 else 4 if stage == 8 else 3
+    active = 1 if stage == 1 else 4 if stage in (5, 9, 13) else 2 if OWNER[stage] == "python" else 3
     accent = ACCENT[stage]
-    mode = "PREPARING" if stage == 1 else "PYTHON MODE" if stage in (2, 8) else "AI MODE"
+    mode = "PREPARING" if stage == 1 else "PYTHON MODE" if OWNER[stage] == "python" else "AI MODE"
     nodes = (
         (925, 125, "PREPARE CODE", "mark AI span", VIOLET),
-        (1068, 125, "PYTHON", "run loop", BLUE),
+        (1068, 125, "PYTHON", "run script", BLUE),
         (1211, 125, "AI RUNTIME", "context + model", accent if active == 3 else AMBER),
-        (1354, 142, "PYTHON", "resume loop", GREEN),
+        (1354, 142, "PYTHON", "resume script", GREEN),
     )
     parts = [
         box(900, 116, 620, 452, fill="#142334", stroke="#405a70",
@@ -200,10 +239,10 @@ def execution_path(stage: int) -> list[str]:
                   anchor="middle"),
         ]
     # A single highlighted arrow shows each handoff between execution phases.
-    connector = {2: 1059, 3: 1202, 8: 1345}
+    connector = {2: 1059, 3: 1202, 4: 1345}.get(active)
     for x in (1059, 1202, 1345):
         parts.append(label(x, 211, "→", size=18,
-                           color=accent if connector.get(stage) == x else "#617e91", weight=700,
+                           color=accent if connector == x else "#617e91", weight=700,
                            anchor="middle"))
     return parts
 
@@ -231,21 +270,20 @@ def frame(stage: int) -> str:
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" '
         f'viewBox="0 0 {WIDTH} {HEIGHT}" role="img" aria-labelledby="title description">',
-        "<title id=\"title\">How Aiython hands a Python expression to an AI model</title>",
-        "<desc id=\"description\">The frontend marks and transforms the red-underlined expression "
-        "in memory. Python executes to that line, where the AI runtime builds a request from "
-        "the statement, nearby source, object metadata and output type. In this example the "
-        "model reads the live message with a tool, returns bug, the runtime checks the type, "
-        "and Python resumes to update its queue.</desc>",
+        "<title id=\"title\">How Aiython routes two tickets and summarizes the queues</title>",
+        "<desc id=\"description\">The frontend marks two red-underlined expressions "
+        "in memory. Python routes the first ticket to bug and the second to billing, making "
+        "one classification call per loop iteration. After the loop, one AI call summarizes "
+        "the completed queues. Python prints both queues and the summary.</desc>",
         box(0, 0, WIDTH, HEIGHT, fill="#0b1726", radius=24),
-        label(40, 57, "One expression: source → context → model → Python",
+        label(40, 57, "Two tickets → two classifications → one summary",
               size=31, weight=700),
-        label(40, 91, "Arrow = current line. Red squiggle = invalid in plain Python. Lit box = current phase.",
+        label(40, 91, "Arrow = current line. Red squiggles = invalid in plain Python. Lit box = current phase.",
               size=20, color="#b9cfdf"),
         *editor(stage),
         *execution_path(stage),
         *detail(stage),
-        label(40, 602, "Illustrative path for one loop iteration. Model tool use may vary.",
+        label(40, 602, "Illustrative model results. Python owns the loop and prints the final output.",
               size=17, color="#b9cfdf"),
         "</svg>",
     ]
@@ -261,7 +299,7 @@ def main() -> None:
     for line_number, code in CODE_LINES:
         if source_lines[line_number - 1] != code:
             raise ValueError(f"The README animation no longer matches {EXAMPLE}:{line_number}")
-    (HERE / "runtime-debug.svg").write_text(frame(8), encoding="utf-8")
+    (HERE / "runtime-debug.svg").write_text(frame(13), encoding="utf-8")
     with tempfile.TemporaryDirectory() as directory:
         temporary = Path(directory)
         frames = []
@@ -273,7 +311,7 @@ def main() -> None:
                 "-frames:v", "1", str(png))
             frames.append(png)
         sequence = temporary / "sequence.txt"
-        durations = (1.8, 1.6, 1.6, 2.7, 2.2, 1.8, 1.7, 2.4)
+        durations = (1.8, 1.5, 1.8, 2.0, 1.6, 1.5, 1.8, 2.0, 1.6, 1.6, 2.0, 2.2, 2.5)
         sequence.write_text("".join(
             f"file '{png}'\nduration {duration}\n"
             for png, duration in zip(frames, durations)
