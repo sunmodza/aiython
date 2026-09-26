@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from aiython.agent import ToolAgent
 from aiython.capabilities import CapabilityPermissionError
@@ -98,3 +98,48 @@ class CodebaseTests(unittest.TestCase):
         config = replace(config,profiles={'default':restricted})
         with self.assertRaises(CapabilityPermissionError):
             run_script(script,config=config,agent_factory=lambda _:ToolAgent(provider))
+
+    def test_scan_and_search_limits_report_truncation(self):
+        self.write('first.py', 'needle\n')
+        self.write('second.py', 'needle\n')
+        with patch('aiython.codebase.MAX_ENTRIES', 1):
+            self.assertIn('Project scan limit', self.code.list_files()['reason'])
+            self.assertIn('Project scan limit', self.code.search('needle')['reason'])
+        with patch('aiython.codebase.MAX_SEARCH_BYTES', 1):
+            result = self.code.search('needle')
+            self.assertTrue(result['truncated'])
+            self.assertIn('Search byte limit', result['reason'])
+
+    def test_specific_path_failures_and_bounded_read(self):
+        for query in ('', 'two\nlines'):
+            with self.subTest(query=query), self.assertRaisesRegex(ValueError, 'single-line'):
+                self.code.search(query)
+        with self.assertRaisesRegex(ValueError, 'regular source file'):
+            self.code.read('missing.py')
+        with self.assertRaisesRegex(ValueError, 'regular source file'):
+            self.code.search('anything', path='missing.py')
+        self.write('wide.py', '\n'.join(['a' * 8000] * 3))
+        result = self.code.read('wide.py', 1, 3)
+        self.assertEqual(len(result['lines']), 2)
+        self.assertTrue(result['truncated'])
+        self.assertEqual(result['next_line'], 3)
+
+    def test_scan_skips_special_files_and_unmatched_names(self):
+        self.write('ordinary.py', 'hello')
+        self.assertEqual(self.code.list_files(query='missing')['files'], [])
+        if hasattr(__import__('os'), 'mkfifo'):
+            __import__('os').mkfifo(self.root / 'pipe.py')
+            self.assertNotIn('pipe.py', self.code.list_files()['files'])
+
+    def test_path_stays_inside_project_if_symlink_changes_during_check(self):
+        path = self.write('safe.py', 'public')
+        original_resolve = Path.resolve
+
+        def changed_target(candidate, *args, **kwargs):
+            if candidate == path:
+                return self.root.parent / 'outside.py'
+            return original_resolve(candidate, *args, **kwargs)
+
+        with patch.object(Path, 'resolve', changed_target):
+            with self.assertRaisesRegex(ValueError, 'outside project'):
+                self.code.path('safe.py')

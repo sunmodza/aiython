@@ -1,0 +1,8 @@
+[run]
+branch = True
+source_dirs = src/aiython
+parallel = True
+patch = subprocess
+
+[report]
+show_missing = True

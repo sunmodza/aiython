@@ -25,7 +25,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           version: latest-known
           enable-cache: false
-      - run: uv run --locked python -m unittest discover -s tests -q
+      - run: uv run --locked --python ${{ matrix.python-version }} --extra a2a python -m unittest discover -s tests -q
 
   build:
     runs-on: ubuntu-latest

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from aiython.config import credential, describe, resolve
+from aiython.config import credential, describe, read_env, resolve
 from aiython.models import ConfigError
 
 
@@ -86,3 +86,34 @@ reranking = { model = "cohere/rerank", api_key_env = "COHERE_KEY" }
         self.assertEqual(selected.project_root, self.root)
         (example / 'aiython.toml').write_text('version=3\nmodel="openrouter/other"\n')
         self.assertEqual(resolve(example / 'demo.py').path, example / 'aiython.toml')
+
+    def test_invalid_routes_profiles_permissions_and_env_path(self):
+        invalid = {
+            '[capabilities]\nunknown="openai/test"': 'Unknown or repeated capability',
+            ('[capabilities]\nspeech-to-text="openai/one"\n'
+             'speech_to_text="openai/two"'): 'Unknown or repeated capability',
+            '[capabilities]\nvideo={understand="gemini/test"}': 'video route requires',
+            '[capabilities]\nembedding=[]': 'Empty route',
+            'permissions=["read_asset", "read_asset"]': 'Invalid permissions',
+            '[profiles.default]\nmodel="openai/test"': 'Profile names',
+            '[profiles." "]\nmodel="openai/test"': 'Profile names',
+            'env_file="../outside.env"': 'env_file must stay inside',
+        }
+        for extra, message in invalid.items():
+            with self.subTest(extra=extra):
+                self.path.write_text('version=3\nmodel="openai/test"\n' + extra + '\n')
+                with self.assertRaisesRegex(ConfigError, message):
+                    resolve(self.root / 'main.py')
+
+    def test_env_file_read_failures_are_explicit(self):
+        with patch('aiython.config.dotenv_values', side_effect=OSError('private path')):
+            with self.assertRaisesRegex(ConfigError, 'Cannot read env_file') as caught:
+                read_env(self.root / 'credentials.env')
+        self.assertNotIn('private path', str(caught.exception))
+        with self.assertRaisesRegex(ConfigError, 'literal KEY=VALUE'):
+            read_env(self.root / 'missing.env')
+
+    def test_profile_without_credential_returns_none(self):
+        self.path.write_text('version=3\nmodel="openai/test"\n')
+        config = resolve(self.root / 'main.py')
+        self.assertIsNone(credential(config, config.profiles['default']))

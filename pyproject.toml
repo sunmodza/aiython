@@ -49,5 +49,6 @@ module-name = "aiython"
 
 [dependency-groups]
 dev = [
+    "coverage>=7.16,<8",
     "zensical>=0.0.65",
 ]

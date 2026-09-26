@@ -55,6 +55,8 @@ def audit(event, args):
         raise SourceWriteError('AI cannot move or remove directories containing potential source files.')
 
 
+# Python otherwise hides audit hooks from tracers, including coverage.
+audit.__cantrace__ = True
 sys.addaudithook(audit)
 
 

@@ -6,6 +6,9 @@ dist/
 site/
 wheels/
 *.egg-info
+.coverage*
+!.coveragerc
+coverage.json
 repomix-output.xml
 
 # Virtual environments

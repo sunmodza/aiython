@@ -1,17 +1,20 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import tomllib
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from aiython.agent import ToolAgent
 from aiython.capabilities import CapabilityRuntime
 from aiython.cli import run_script
 from aiython.config import resolve
-from aiython.models import ConfigError, ProviderError, ResolvedConfig
+from aiython.config_hints import append_missing_route_example, example, setup_command
+from aiython.models import ConfigError, ProfileConfig, ProviderError, ResolvedConfig
 
 
 class ConfigHintTests(unittest.TestCase):
@@ -72,3 +75,42 @@ class ConfigHintTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, 'No route for capability'):
             CapabilityRuntime(elsewhere).routes(config.profiles['default'], 'speech_to_text')
         self.assertEqual(self.path.read_text(), original)
+
+    def test_invalid_or_linked_config_is_never_modified(self):
+        config = resolve(self.script)
+        profile = config.profiles['default']
+        self.assertIsNone(append_missing_route_example(ResolvedConfig(None, self.root),
+                                                       profile, 'embedding'))
+        linked = self.root / 'linked.toml'
+        linked.symlink_to(self.path)
+        self.assertIsNone(append_missing_route_example(
+            ResolvedConfig(linked, self.root), profile, 'embedding'))
+        for source in ('version=2\nmodel="openai/test"\n', 'not valid TOML = ['):
+            with self.subTest(source=source):
+                self.path.write_text(source)
+                self.assertIsNone(append_missing_route_example(config, profile, 'embedding'))
+                self.assertEqual(self.path.read_text(), source)
+        self.path.write_text('version=3\nmodel="openai/test"\n')
+        with patch('aiython.config_hints.stat.S_ISREG', return_value=False):
+            self.assertIsNone(append_missing_route_example(config, profile, 'embedding'))
+
+    def test_video_hint_quotes_profile_and_preserves_last_line(self):
+        self.path.write_text('version=3\nmodel="openai/test"')
+        profile = ProfileConfig('video profile', 'fake', 'model')
+        config = ResolvedConfig(self.path, self.root)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(append_missing_route_example(config, profile, 'video'), self.path)
+        updated = self.path.read_text()
+        self.assertIn('model="openai/test"\n\n# >>>', updated)
+        self.assertIn('# video = { understand = ', updated)
+        self.assertIn('# [profiles."video profile".capabilities]', example(profile, 'video'))
+        self.assertIn("--profile 'video profile'", setup_command(profile, 'video'))
+
+    def test_hint_works_on_platform_without_nofollow_flag(self):
+        config = resolve(self.script)
+        portable_os = SimpleNamespace(O_WRONLY=os.O_WRONLY, O_APPEND=os.O_APPEND,
+                                      open=os.open, fdopen=os.fdopen)
+        with patch('aiython.config_hints.os', portable_os), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(append_missing_route_example(
+                config, config.profiles['default'], 'embedding'), self.path)
+        self.assertIn('# embedding = ', self.path.read_text())
