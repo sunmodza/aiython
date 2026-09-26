@@ -5,17 +5,25 @@ on:
     branches: [main]
     paths:
       - "docs/**"
+      - "examples/recipes/**"
+      - "examples/capabilities/**"
       - "zensical.toml"
       - "pyproject.toml"
       - "uv.lock"
+      - "scripts/check_docs_site.py"
       - ".github/workflows/docs.yml"
+      - ".github/workflows/release.yml"
   pull_request:
     paths:
       - "docs/**"
+      - "examples/recipes/**"
+      - "examples/capabilities/**"
       - "zensical.toml"
       - "pyproject.toml"
       - "uv.lock"
+      - "scripts/check_docs_site.py"
       - ".github/workflows/docs.yml"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 permissions:
@@ -34,3 +42,4 @@ jobs:
           version: latest-known
           enable-cache: false
       - run: uv run --locked zensical build --clean --strict
+      - run: uv run --locked python scripts/check_docs_site.py
