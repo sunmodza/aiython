@@ -3,11 +3,12 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from aiython.cli import run_script
 from aiython.frontend import parse
 from aiython.models import AgentRequest, ProfileConfig, RecoveryDecision, ResolvedConfig, SourceSpan
-from aiython.runtime import Runtime, RuntimeBridge
+from aiython.runtime import Runtime, RuntimeBridge, focused_source, nearby_source
 
 
 class ContextTests(unittest.TestCase):
@@ -166,7 +167,10 @@ def right():
                 outer.assertTrue(nearby["truncated"])
                 outer.assertIn("choose a value", nearby["code"])
                 outer.assertLessEqual(len(nearby["code"]), 12000)
-                outer.assertEqual(nearby["start_line"], request.span.line - 12)
+                outer.assertGreaterEqual(nearby["start_line"], request.span.line - 12)
+                outer.assertEqual(nearby["selection"], "syntax")
+                outer.assertIn("...", nearby["code"])
+                outer.assertLess(len(nearby["code"]), 200)
                 outer.assertTrue(full["code"].startswith("def work():"))
                 outer.assertNotIn("answer = work()", full["code"])
                 outer.assertEqual(request.frame_code, full["code"])
@@ -175,6 +179,33 @@ def right():
                 outer.assertLess(len(new), len(old) // 5)
                 return 42
         self.assertEqual(self.run_source(source, Agent())["answer"], 42)
+
+    def test_focused_source_keeps_named_binding_and_current_statement(self):
+        source = ('def work():\n' + '    # padding\n' * 300 +
+                  '    target = 7\n' + '    # unrelated\n' * 6 +
+                  '    result = choose using target\n    return result\n')
+        line = source.splitlines().index('    result = choose using target') + 1
+        selected = focused_source('main.py', 1, len(source.splitlines()), source,
+                                  line, line, ('target', 'unused'), 'openai/gpt-4.1-mini')
+        baseline = nearby_source('main.py', 1, len(source.splitlines()), source, line, line)
+        self.assertEqual(selected['selection'], 'syntax')
+        self.assertIn('target = 7', selected['code'])
+        self.assertIn('choose using target', selected['code'])
+        self.assertLess(len(selected['code']), len(baseline['code']))
+
+    def test_focused_source_preserves_bounded_view_when_selection_is_unavailable(self):
+        source = 'def work():\n' + '    # padding\n' * 300 + '    x = choose a value\n'
+        end = len(source.splitlines())
+        expected = nearby_source('main.py', 1, end, source, end, end)
+        self.assertEqual(focused_source('main.py', 1, end, source, 0, 0, (), 'test'),
+                         nearby_source('main.py', 1, end, source, 0, 0))
+        with patch('grep_ast.TreeContext', side_effect=ValueError('parser unavailable')):
+            self.assertEqual(focused_source('main.py', 1, end, source, end, end, (), 'parser-error'), expected)
+        with patch('aiython.providers.sdk') as sdk:
+            sdk.return_value.token_counter.side_effect = [9, 10]
+            self.assertEqual(focused_source('main.py', 1, end, source, end, end, (), 'no-token-saving'), expected)
+            sdk.return_value.token_counter.side_effect = ValueError('tokenizer unavailable')
+            self.assertEqual(focused_source('main.py', 1, end, source, end, end, (), 'token-error'), expected)
 
     def test_short_frame_includes_preceding_definitions(self):
         outer = self

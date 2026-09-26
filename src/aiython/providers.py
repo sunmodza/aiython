@@ -95,6 +95,20 @@ def route_settings(config, route):
     return {"model": route["model"], "api_key": key, "api_base": info.get("api_base")}
 
 
+def record_request_token_estimate(llm, model, messages, tools, tool_choice):
+    stats = CURRENT_STATS.get()
+    if stats is None:
+        return
+    try:
+        count = llm.token_counter(model=model, messages=messages, tools=tools,
+                                  tool_choice=tool_choice)
+    except Exception:
+        return
+    if type(count) is int and count >= 0:
+        with stats._lock:
+            stats.request_token_estimates.append(count)
+
+
 class LiteLLMProvider:
     def __init__(self, config, profile):
         self.config = config
@@ -113,6 +127,8 @@ class LiteLLMProvider:
                 if CURRENT_STATS.get() is not None:
                     record_request_bytes(len(json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False).encode()))
                 llm = sdk()
+                record_request_token_estimate(llm, settings["model"], messages, tools,
+                                              self.profile.tool_choice if tools else "auto")
                 result = llm.completion(
                     model=settings["model"], messages=messages, tools=tools,
                     tool_choice=self.profile.tool_choice if tools else "auto",
@@ -143,6 +159,8 @@ class LiteLLMProvider:
                 if CURRENT_STATS.get() is not None:
                     record_request_bytes(len(json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False).encode()))
                 llm = sdk()
+                record_request_token_estimate(llm, settings["model"], messages, tools,
+                                              self.profile.tool_choice if tools else "auto")
                 result = await llm.acompletion(
                     model=settings["model"], messages=messages, tools=tools,
                     tool_choice=self.profile.tool_choice if tools else "auto",

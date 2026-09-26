@@ -17,6 +17,7 @@ classifiers = [
     "Topic :: Software Development :: Interpreters",
 ]
 dependencies = [
+    "grep-ast>=0.9,<1",
     "httpx>=0.28,<1",
     "jsonschema>=4,<5",
     "litellm>=1.102.1,<1.103",

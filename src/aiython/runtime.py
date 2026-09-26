@@ -51,6 +51,63 @@ def nearby_source(filename, base, end_line, code, line, last_line):
             'truncated': first > base or last < end_line or len(limited) < len(text)}
 
 
+@lru_cache(maxsize=64)
+def focused_source(filename, base, end_line, code, line, last_line, related_names, model):
+    """Select relevant lines from the bounded source window with grep-ast."""
+    size = len(code.encode())
+    render_nearby = nearby_source if size <= 128 * 1024 else nearby_source.__wrapped__
+    nearby = render_nearby(filename, base, end_line, code, line, last_line)
+    if size <= 4000 or size > 128 * 1024 or not filename.endswith('.py'):
+        return nearby
+    lines = nearby['code'].splitlines()
+    first, last = line - nearby['start_line'], last_line - nearby['start_line']
+    if first < 0 or last < first or last >= len(lines):
+        return nearby
+    try:
+        from grep_ast import TreeContext
+        view = TreeContext(filename, nearby['code'], color=False, line_number=False,
+                           parent_context=True, child_context=False, last_line=False,
+                           margin=0, mark_lois=False, header_max=1, loi_pad=2,
+                           show_top_of_file_parent_scope=True)
+        selected = set(range(first, last + 1))
+        preceding = range(max(0, first - 12), first)
+        for name in related_names[:8]:
+            pattern = re.compile(r'\b' + re.escape(name) + r'\b')
+            matches = [i for i in preceding if pattern.search(lines[i])]
+            if matches:
+                selected.add(matches[-1])
+        view.add_lines_of_interest(selected)
+        view.add_context()
+    except Exception:
+        # Unsupported or malformed source still has the original bounded view.
+        return nearby
+    visible = sorted(view.show_lines & set(range(len(lines))))
+    parts = []
+    previous = -1
+    for index in visible:
+        if index > previous + 1:
+            indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+            parts.append(indent + '...\n')
+        parts.append(lines[index] + '\n')
+        previous = index
+    compact = ''.join(parts)
+    if len(compact) > 12000 or len(compact.encode()) >= len(nearby['code'].encode()):
+        return nearby
+    try:
+        from .providers import sdk
+        count = sdk().token_counter
+        # The selection marker and JSON wrapper cost a few tokens too.
+        if count(model=model, text=compact) + 8 >= count(model=model, text=nearby['code']):
+            return nearby
+    except Exception:
+        return nearby
+    return {'available': True, 'filename': filename,
+            'start_line': nearby['start_line'] + visible[0],
+            'end_line': nearby['start_line'] + visible[-1], 'code': compact,
+            'truncated': nearby['truncated'] or len(visible) < len(lines),
+            'selection': 'syntax'}
+
+
 @lru_cache(maxsize=128)
 def expression_code(source):
     # eval(str) strips leading spaces/tabs; compile(str, ..., 'eval') does not.
@@ -231,9 +288,10 @@ class RuntimeBridge:
         def nearby(source, span):
             if not source.get("available"):
                 return source
-            render = nearby_source if len(source['code']) <= 256 * 1024 else nearby_source.__wrapped__
+            render = focused_source if len(source['code']) <= 256 * 1024 else focused_source.__wrapped__
             return dict(render(source['filename'], source['start_line'], source['end_line'],
-                               source['code'], span.line, span.end_line))
+                               source['code'], span.line, span.end_line,
+                               tuple(sorted(request.related_objects)), request.profile.model))
         source = self.get_frame_code()
         # Custom agents/tests may provide a source string without registering a unit.
         if not source.get("available"):

@@ -15,6 +15,9 @@ can also appear on stderr, so parse by prefix. For each invocation, inspect `mod
 `context_build_seconds`, and `request_bytes`. The stats contain counts and
 timings, not prompts or values. `provider_seconds` includes SDK and network time;
 `request_bytes` estimates serialized model messages and tools, not wire bytes.
+`request_token_estimates` uses LiteLLM's tokenizer before each provider request;
+sum the estimates when comparing them with provider-reported `prompt_tokens`,
+since custom model tokenizers and provider-side formatting can differ.
 `retry_backoff_seconds` remains zero because ambiguous requests are not retried.
 
 The additional fields distinguish local setup, model work, and capabilities:
@@ -92,6 +95,13 @@ request bytes in those runs but did not pass the latency and call-count gate.
    [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
 4. Check cold start separately from warm invocations. LiteLLM loads lazily on the
    first AI call; ordinary Python should not pay for that import.
+
+For long registered Python frames, Aiython uses `grep-ast` on the bounded source
+window to keep the active statement, nearby referenced bindings and scope headers
+within that window when the result saves estimated tokens. This limits parser work
+on long files. Short frames, unsupported sources and tokenizer failures retain the
+bounded window. The full registered source remains available through
+`get_frame_code` when needed.
 
 No finite benchmark proves correctness for every future program. It provides a
 repeatable gate and a way to expand coverage when a new failure appears.

@@ -15,6 +15,7 @@ class InvocationStats:
     provider_requests: int = 0
     tools: int = 0
     request_bytes: int | None = None
+    request_token_estimates: list[int] = field(default_factory=list)
     context_build_seconds: float = 0
     context_bytes: dict[str, int] = field(default_factory=dict)
     provider_seconds: float = 0

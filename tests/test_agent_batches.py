@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from aiython.agent import ToolAgent, validate_schema
 from aiython.models import AgentRequest, ProfileConfig, ProviderError, RecoveryRequest, ResolvedConfig, SourceSpan
 from aiython.prompt_cache import canonical
-from aiython.providers import LiteLLMProvider
+from aiython.providers import LiteLLMProvider, record_request_token_estimate
 from aiython.runtime import Runtime, RuntimeBridge
 from aiython.stats import CURRENT_STATS, InvocationStats, record_token_usage
 
@@ -332,6 +332,7 @@ class BatchTests(unittest.TestCase):
         config = ResolvedConfig(None, Path.cwd(), providers={'route': {'model': 'openai/test', 'api_key_env': 'TEST_AI_KEY'}})
         provider = LiteLLMProvider(config, request.profile)
         sdk = Mock(completion=Mock(return_value={"choices": [{"message": response(call("done", "finish"))}]}))
+        sdk.token_counter.return_value = 123
         bridge = self.bridge(inspect.currentframe(), stats=True)
         progress = io.StringIO()
         with contextlib.redirect_stderr(progress), patch.dict('os.environ', {'TEST_AI_KEY': key}), \
@@ -345,6 +346,7 @@ class BatchTests(unittest.TestCase):
         self.assertNotIn(code, progress.getvalue())
         body = sdk.completion.call_args.kwargs
         self.assertGreater(record.request_bytes, 0)
+        self.assertEqual(record.request_token_estimates, [123])
         self.assertEqual(body['max_retries'], 0)
         self.assertEqual(record.context_bytes, {
             'system': len(body['messages'][0]['content'].encode()),
@@ -361,6 +363,19 @@ class BatchTests(unittest.TestCase):
         self.assertGreaterEqual(record.context_build_seconds, 0)
         self.assertEqual(set(record.context_bytes), {"system", "stable", "live", "tools"})
         self.assertTrue(all(size > 0 for size in record.context_bytes.values()))
+
+    def test_request_token_estimate_ignores_invalid_counts(self):
+        stats = InvocationStats('test.py', 1, 'syntax')
+        token = CURRENT_STATS.set(stats)
+        try:
+            llm = Mock()
+            llm.token_counter.return_value = -1
+            record_request_token_estimate(llm, 'openai/test', [], [], 'auto')
+            llm.token_counter.side_effect = ValueError('unknown tokenizer')
+            record_request_token_estimate(llm, 'openai/test', [], [], 'auto')
+            self.assertEqual(stats.request_token_estimates, [])
+        finally:
+            CURRENT_STATS.reset(token)
 
     def test_model_calls_reduced_for_same_value(self):
         legacy = Mock()
