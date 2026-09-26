@@ -48,4 +48,4 @@ The plan tool accepts a DAG of steps with IDs, dependencies such as `{"$ref":"st
 
 Project caches, vector indexes, and job manifests live in `.aiython/runtime-v3.sqlite`. The previous database is left untouched. Read-only extraction and analysis can cache by content; generated media is fresh unless a plan opts into caching. Caches do not serialize Python live objects. `--trace-plan` shows actual step events; `--explain` is static and does not run capabilities.
 
-See [sample programs and assets](https://github.com/sunmodza/aiython/blob/main/examples/capabilities/README.md).
+See [sample programs](examples.md#documents-and-media).

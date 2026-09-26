@@ -36,7 +36,7 @@ aiython setup --capability video --understand-model openrouter/google/gemini-2.5
 aiython setup --capability image_generation --profile fast --model openai/image-model --non-interactive
 ```
 
-These IDs illustrate the syntax; availability depends on your provider account. Each route may use a separate `api_key_env` and provider. The video understanding and generation routes can be changed independently. `--check` tests only the reasoning model because a media probe could create a billable artifact or job; run a [capability example](https://github.com/sunmodza/aiython/blob/main/examples/capabilities/README.md) to test a media route intentionally.
+These IDs illustrate the syntax; availability depends on your provider account. Each route may use a separate `api_key_env` and provider. The video understanding and generation routes can be changed independently. `--check` tests only the reasoning model because a media probe could create a billable artifact or job; run a [capability example](examples.md#documents-and-media) to test a media route intentionally.
 
 When a required route is missing, Aiython reports the matching setup command and appends an inert commented example to the TOML. It does not invent a model ID or activate a route on your behalf.
 

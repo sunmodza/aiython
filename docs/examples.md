@@ -1,35 +1,104 @@
 # Examples
 
-The [recipe directory](https://github.com/sunmodza/aiython/tree/main/examples/recipes) contains small programs that isolate one behavior each. You can inspect any recipe without a model or API key:
+Each recipe shows one Aiython behavior. Copy a program into a `.py` file, run `aiython setup`, then inspect and run it:
 
 ```bash
-uv run aiython --explain examples/recipes/01_typed_result.py
+aiython --explain example.py
+aiython --stats example.py
 ```
 
-Run `aiython setup` at the repository root before executing a recipe. Then, for example:
+`--explain` needs no model or API key. Running the program can call your configured provider and incur charges. If you installed Aiython in a uv project, prefix these commands with `uv run`.
 
-```bash
-uv run aiython --stats examples/recipes/01_typed_result.py
+## Typed result
+
+A `TypedDict` and `Literal` constrain an AI result. Aiython checks the value before assigning it to `draft`.
+
+```python
+--8<-- "examples/recipes/01_typed_result.py"
 ```
 
-| Recipe | What it shows |
-| --- | --- |
-| [Typed result](https://github.com/sunmodza/aiython/blob/main/examples/recipes/01_typed_result.py) | A `TypedDict` and `Literal` constrain an AI result. |
-| [Update state](https://github.com/sunmodza/aiython/blob/main/examples/recipes/02_update_state.py) | An AI statement changes existing objects. |
-| [Python loop](https://github.com/sunmodza/aiython/blob/main/examples/recipes/03_loop.py) | Python routes tickets in a loop; AI summarizes once afterward. |
-| [Recovery](https://github.com/sunmodza/aiython/blob/main/examples/recipes/04_recovery.py) | A valid Python statement fails and reaches a recovery checkpoint. |
-| [Existing object](https://github.com/sunmodza/aiython/blob/main/examples/recipes/05_existing_object.py) | AI selects a live dataclass instance without copying it. |
-| [Python first](https://github.com/sunmodza/aiython/blob/main/examples/recipes/06_python_first.py) | Python computes Fibonacci; AI explains the result afterward. |
+## Update state
 
-AI-generated values can vary between runs. The recovery recipe is valid Python, so its AI work starts only when the `KeyError` occurs. The [recipe guide](https://github.com/sunmodza/aiython/blob/main/examples/recipes/README.md) has details about project configuration.
+An AI statement changes existing Python objects.
+
+```python
+--8<-- "examples/recipes/02_update_state.py"
+```
+
+## Python loop
+
+Python routes tickets in a loop; AI summarizes once afterward.
+
+```python
+--8<-- "examples/recipes/03_loop.py"
+```
+
+## Recovery
+
+A valid Python statement fails and reaches a recovery checkpoint. Its AI work begins only when the `KeyError` occurs.
+
+```python
+--8<-- "examples/recipes/04_recovery.py"
+```
+
+## Existing object
+
+AI selects a live dataclass instance. The identity check confirms that the returned object was not copied.
+
+```python
+--8<-- "examples/recipes/05_existing_object.py"
+```
+
+## Python first
+
+Python computes Fibonacci; AI explains the result afterward.
+
+```python
+--8<-- "examples/recipes/06_python_first.py"
+```
+
+AI-generated values can vary between runs. Read [how the runtime works](runtime.md) for the execution boundary and [type safety](type-safety.md) for result checks.
 
 ## Documents and media
 
-The [capability examples](https://github.com/sunmodza/aiython/tree/main/examples/capabilities) include sample files and programs for documents, product images, audio, and video. They require the matching routes in your configuration; see the [capability guide](capabilities.md) before running them. You can inspect their AI boundaries without credentials:
+Capability programs need matching routes in your configuration. See the [capability guide](capabilities.md) before running them. Save each script and its assets in the same directory.
 
-```bash
-uv run aiython --explain examples/capabilities/documents.py
-uv run aiython --explain examples/capabilities/products.py
+### Document understanding
+
+Save this program as `documents.py`:
+
+```python
+--8<-- "examples/capabilities/documents.py"
 ```
 
-The full [capability example guide](https://github.com/sunmodza/aiython/blob/main/examples/capabilities/README.md) explains the bundled assets and setup. Executing these programs can call paid providers, and the media example requests several generation capabilities.
+Save this sample policy as `policy.md` beside it:
+
+```markdown
+--8<-- "examples/capabilities/policy.md"
+```
+
+### Image matching
+
+Save this program as `products.py`:
+
+```python
+--8<-- "examples/capabilities/products.py"
+```
+
+Download [red-shoe.jpg](assets/examples/red-shoe.jpg), [blue-boot.jpg](assets/examples/blue-boot.jpg), and [shoe.jpg](assets/examples/shoe.jpg) beside it. These are fictional, unbranded product images.
+
+### Media and video
+
+The larger media program combines speech, vision, image, and video capabilities:
+
+```python
+--8<-- "examples/capabilities/media.py"
+```
+
+For this program, also download [meeting.mp3](assets/examples/meeting.mp3), [clip.mp4](assets/examples/clip.mp4), and the three product images above. The [sample transcript](assets/examples/meeting-transcript.md) lets you check the speech result. The smaller video-only program shows a resumable generation job:
+
+```python
+--8<-- "examples/capabilities/video_generation.py"
+```
+
+Media generation can take longer and incur charges. Run `aiython --explain PATH` first to inspect the boundary without making a provider call.

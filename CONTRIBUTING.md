@@ -28,8 +28,10 @@ and error behavior; live API checks are optional and may incur charges.
 
 The documentation website uses the Markdown files in `docs/`. Preview it with
 `uv run zensical serve` and check the production build with
-`uv run zensical build --clean --strict`. Keep links to files outside `docs/` as
-GitHub URLs so they also work on the published site.
+`uv run zensical build --clean --strict`. The public site is built from a release
+tag after the PyPI publish job succeeds. It is served from the separate public
+`aiython-docs` repository; this source repository remains private. Link to pages
+inside `docs/` rather than private repository files.
 
 ## Submit a change
 

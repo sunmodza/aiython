@@ -80,3 +80,46 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  publish-docs:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: documentation
+      url: https://sunmodza.github.io/aiython-docs/
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.11"
+          version: latest-known
+          enable-cache: false
+      - run: uv run --locked zensical build --clean --strict
+      - name: Publish built pages
+        env:
+          DOCS_DEPLOY_KEY: ${{ secrets.AIYTHON_DOCS_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DOCS_DEPLOY_KEY" ]]; then
+            echo "::error::AIYTHON_DOCS_DEPLOY_KEY is not configured"
+            exit 1
+          fi
+
+          install -m 700 -d "$RUNNER_TEMP/docs-ssh"
+          printf '%s\n' "$DOCS_DEPLOY_KEY" > "$RUNNER_TEMP/docs-ssh/key"
+          chmod 600 "$RUNNER_TEMP/docs-ssh/key"
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$RUNNER_TEMP/docs-ssh/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/docs-ssh/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/docs-ssh/known_hosts -o StrictHostKeyChecking=yes"
+
+          git clone --quiet --branch gh-pages --single-branch git@github.com:sunmodza/aiython-docs.git "$RUNNER_TEMP/aiython-docs"
+          rsync -a --delete --exclude=.git site/ "$RUNNER_TEMP/aiython-docs/"
+          touch "$RUNNER_TEMP/aiython-docs/.nojekyll"
+          git -C "$RUNNER_TEMP/aiython-docs" add -A
+          if ! git -C "$RUNNER_TEMP/aiython-docs" diff --cached --quiet; then
+            git -C "$RUNNER_TEMP/aiython-docs" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Publish Aiython docs for $GITHUB_REF_NAME"
+            git -C "$RUNNER_TEMP/aiython-docs" push origin gh-pages
+          fi

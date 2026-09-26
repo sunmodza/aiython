@@ -98,7 +98,8 @@ repeatable gate and a way to expand coverage when a new failure appears.
 
 ## Offline runtime benchmark
 
-   [`benchmarks/runtime_overhead.py`](https://github.com/sunmodza/aiython/blob/main/benchmarks/runtime_overhead.py) measures
+This section is for maintainers with a source checkout. The
+`benchmarks/runtime_overhead.py` script measures
 local execution, repeated preparation, SQLite cache reads, and fresh-process
 startup without contacting a model. The AI-invocation fixture uses a fake
 provider that completes in one response. Every execution checks its result.
@@ -115,7 +116,7 @@ after a warm-up, source and runner hashes, dependency versions and the raw
 samples. Repeated preparation measures a warm process-local cache; startup uses
 a fresh process but filesystem caches may be warm. These are different cases.
 
-See the [recorded comparison](https://github.com/sunmodza/aiython/blob/main/benchmarks/README.md) and its raw JSON evidence.
+Keep the raw JSON evidence with each benchmark run so results can be checked later.
 Time reduction is `100 * (before - after) / before`; speedup is `before / after`.
 A 50% time reduction is 2x speed, not a 50% throughput increase. Report the case
 and timing scope with each claim. These results do not establish model-backed

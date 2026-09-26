@@ -1,8 +1,7 @@
 [project]
 site_name = "Aiython"
+site_url = "https://sunmodza.github.io/aiython-docs/"
 site_description = "Run Python normally and bring in AI at the current statement."
-repo_url = "https://github.com/sunmodza/aiython"
-edit_uri = "edit/main/docs/"
 docs_dir = "docs"
 site_dir = "site"
 nav = [
@@ -23,7 +22,6 @@ nav = [
 logo = "assets/icon.png"
 favicon = "assets/icon.png"
 features = [
-  "content.action.edit",
   "content.code.copy",
   "navigation.sections",
   "navigation.top",
@@ -43,3 +41,18 @@ primary = "indigo"
 accent = "indigo"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to light mode"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+toc = { permalink = true }
+"pymdownx.details" = {}
+"pymdownx.highlight" = { anchor_linenums = true, line_spans = "__span", pygments_lang_class = true }
+"pymdownx.magiclink" = {}
+"pymdownx.snippets" = { base_path = ["."], check_paths = true }
+"pymdownx.superfences" = {}
+"pymdownx.tabbed" = { alternate_style = true, combine_header_slug = true }
+"pymdownx.tasklist" = { custom_checkbox = true }

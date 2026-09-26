@@ -4,6 +4,8 @@
 
 Aiython runs Python normally and can bring in AI when Python cannot parse the source or continue execution. AI works with the live program state; Python keeps control of execution.
 
+[Read the documentation](https://sunmodza.github.io/aiython-docs/).
+
 ```python
 from typing import Literal
 

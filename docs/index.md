@@ -4,7 +4,7 @@
 
 Aiython runs Python normally and brings in AI when Python cannot parse the source or continue execution. AI works with the live program state; Python keeps control of execution.
 
-[Get started](getting-started.md) · [Browse examples](examples.md) · [View on GitHub](https://github.com/sunmodza/aiython)
+[Get started](getting-started.md) · [Browse examples](examples.md)
 
 ![Animated walkthrough of two tickets being classified in a Python loop and summarized after the loop.](assets/runtime-debug.gif)
 
@@ -25,7 +25,7 @@ summary = summarize the routed tickets in one sentence
 print(queues, summary)
 ```
 
-The two natural-language statements are invalid in plain Python. Aiython handles each one when execution reaches it: two classifications inside the loop, then one summary after the loop. Try the [complete loop example](https://github.com/sunmodza/aiython/blob/main/examples/recipes/03_loop.py) or inspect the AI boundary with `aiython --explain PATH` before running it.
+The two natural-language statements are invalid in plain Python. Aiython handles each one when execution reaches it: two classifications inside the loop, then one summary after the loop. Try the [complete loop example](examples.md#python-loop) or inspect the AI boundary with `aiython --explain PATH` before running it.
 
 ## Explore the documentation
 
