@@ -104,7 +104,9 @@ class LiteLLMProvider:
         routes = self.profile.routes.get("reasoning", [])
         if not routes:
             raise ConfigError("Reasoning model is not configured")
-        for index, route in enumerate(routes):
+        index = 0
+        while True:
+            route = routes[index]
             settings = route_settings(self.config, route)
             number = provider_request_started(settings["model"])
             try:
@@ -124,15 +126,17 @@ class LiteLLMProvider:
             except Exception as exc:
                 code = getattr(exc, "status_code", None)
                 if code == 429 and index + 1 < len(routes):
+                    index += 1
                     continue
                 response_error(self.profile, failure_reason(code), code=code)
-        raise ProviderError("No reasoning route succeeded")
 
     async def acomplete(self, messages: list[dict], tools: list[dict]) -> dict:
         routes = self.profile.routes.get("reasoning", [])
         if not routes:
             raise ConfigError("Reasoning model is not configured")
-        for index, route in enumerate(routes):
+        index = 0
+        while True:
+            route = routes[index]
             settings = route_settings(self.config, route)
             number = provider_request_started(settings["model"])
             try:
@@ -152,9 +156,9 @@ class LiteLLMProvider:
             except Exception as exc:
                 code = getattr(exc, "status_code", None)
                 if code == 429 and index + 1 < len(routes):
+                    index += 1
                     continue
                 response_error(self.profile, failure_reason(code), code=code)
-        raise ProviderError("No reasoning route succeeded")
 
 
 def load_provider(config, profile):

@@ -177,3 +177,20 @@ class BoundaryTests(unittest.TestCase):
         function = ast.parse('def work(x: int, *args, **kwargs) -> str: pass').body[0]
         self.assertEqual(source_hint(function)['signature'],
                          '(x: int, *args, **kwargs) -> str')
+        self.assertEqual(source_hint(ast.parse('x = 1').body[0]), {})
+
+    def test_registered_function_hint_is_cached_without_values(self):
+        def selected(value: int) -> int:
+            return value
+
+        node = ast.parse('def selected(value: int) -> int: return value').body[0]
+        manager = SimpleNamespace(
+            source_nodes={selected.__code__.co_filename: (
+                {(selected.__name__, selected.__code__.co_firstlineno): (node,)}, {})},
+            source_hints={}, _lock=threading.Lock())
+        field = lambda value, name: getattr(value, name)
+        self.assertEqual(structural_hint(selected, manager, field)['signature'],
+                         '(value: int) -> int')
+        self.assertIn(node, manager.source_hints)
+        module = types.ModuleType('visible_module')
+        self.assertEqual(structural_hint(module, manager, field)['name'], 'visible_module')

@@ -112,7 +112,7 @@ class Frontend:
                 at = self.offset(*t.end)
                 if at <= position:
                     lower = at
-                elif at > position:
+                else:
                     upper = at
                     break
         local = [t for t in useful if lower <= self.offset(*t.start) < upper]
@@ -187,12 +187,11 @@ class Frontend:
                         if not balanced or delimiters:
                             continue
                         candidates.append((start, end, True))
-        if self.lines:
-            text = self.lines[line - 1]
-            start = self.offset(line, len(text) - len(text.lstrip(" \t")))
-            end = self.offset(line, len(text.rstrip("\r\n")))
-            if start < end:
-                candidates.append((start, end, False))
+        text = self.lines[line - 1]
+        start = self.offset(line, len(text) - len(text.lstrip(" \t")))
+        end = self.offset(line, len(text.rstrip("\r\n")))
+        if start < end:
+            candidates.append((start, end, False))
         candidates.sort(key=lambda c: (c[1] - c[0], c[0]))
         # Grow to enclosing suites, including decorators attached to definitions.
         for first in range(line - 1, -1, -1):

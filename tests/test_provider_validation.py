@@ -1,12 +1,14 @@
 """Provider response and route failure behavior without network calls."""
 
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from aiython.models import ConfigError, ProfileConfig, ProviderError, ResolvedConfig
 from aiython.providers import LiteLLMProvider, parse_completion
+from aiython.stats import CURRENT_STATS, InvocationStats
 
 
 def provider_with_routes():
@@ -64,6 +66,20 @@ class ProviderValidationTests(unittest.TestCase):
                 provider.complete([], [])
         self.assertNotIn('secret', str(caught.exception))
 
+    def test_sdk_load_records_time_when_statistics_are_enabled(self):
+        from aiython.providers import sdk
+
+        fake_sdk = SimpleNamespace(suppress_debug_info=False)
+        stats = InvocationStats('test.py', 1, 'syntax')
+        token = CURRENT_STATS.set(stats)
+        try:
+            with patch.dict(sys.modules, {'litellm': fake_sdk}):
+                self.assertIs(sdk(), fake_sdk)
+        finally:
+            CURRENT_STATS.reset(token)
+        self.assertTrue(fake_sdk.suppress_debug_info)
+        self.assertGreaterEqual(stats.sdk_load_seconds, 0)
+
 
 class AsyncProviderValidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_async_rate_limit_moves_to_next_route_once(self):
@@ -91,3 +107,22 @@ class AsyncProviderValidationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ProviderError, 'unavailable') as caught:
                 await provider.acomplete([], [])
         self.assertNotIn('secret', str(caught.exception))
+
+    async def test_async_statistics_and_provider_error_passthrough(self):
+        provider = provider_with_routes()
+        stats = InvocationStats('test.py', 1, 'syntax')
+        token = CURRENT_STATS.set(stats)
+        try:
+            sdk = SimpleNamespace(acompletion=AsyncMock(return_value={
+                'choices': [{'message': {'content': 'done'}}],
+            }))
+            with patch('aiython.providers.sdk', return_value=sdk):
+                self.assertEqual((await provider.acomplete([{'role': 'user', 'content': 'hi'}], []))['content'],
+                                 'done')
+            self.assertGreater(stats.request_bytes or 0, 0)
+            sdk.acompletion.return_value = {'choices': []}
+            with patch('aiython.providers.sdk', return_value=sdk):
+                with self.assertRaisesRegex(ProviderError, 'no completion choices'):
+                    await provider.acomplete([], [])
+        finally:
+            CURRENT_STATS.reset(token)

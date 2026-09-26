@@ -553,7 +553,9 @@ class CapabilityRuntime:
             self.validate_result(capability, params, result.value)
             return result.value
         entries = self.routes(profile, capability, provider, params.get("mode"))
-        for number, route in enumerate(entries):
+        number = 0
+        while True:
+            route = entries[number]
             adapter = self.adapter(route, profile)
             if not isinstance(adapter, LocalProvider): self.require(profile, 'network')
             if capability not in adapter.capabilities():
@@ -586,6 +588,7 @@ class CapabilityRuntime:
             except InvocationError as exc:
                 self.event(capability=capability, provider=route['provider'], status='failed', accepted=exc.accepted)
                 if exc.retryable and not exc.accepted and number + 1 < len(entries):
+                    number += 1
                     continue
                 raise
             finally:
@@ -782,7 +785,8 @@ class CapabilityRuntime:
                     # Interruptions must not abandon in-flight capability work.
                     from concurrent.futures import wait
                     wait(pending.values())
-                if errors: raise errors[0]
+                if errors:
+                    raise errors[0]
             else:
                 name = ready[0]
                 results[name] = execute(name)

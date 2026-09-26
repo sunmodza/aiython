@@ -126,7 +126,6 @@ class Contract:
             raise TypeViolation(f'{path}: expected {self.name}, got {type(value).__name__}' + (f' ({detail})' if detail else ''))
         def child(contract, item, suffix):
             contract.validate(item, path + suffix, bindings=bindings, seen=seen)
-        if kind == 'any': return
         if kind in ('alias', 'annotated', 'qualifier'):
             child(self.args[0], value, '')
         elif kind == 'never': fail('this boundary must not return')
@@ -206,17 +205,20 @@ class Compiler:
 
     def lookup(self, node, names):
         if isinstance(node,ast.Name):
-            if node.id not in names: raise UnsupportedType(f'Unresolved output type: {node.id}')
+            if node.id not in names:
+                raise UnsupportedType(f'Unresolved output type: {node.id}')
             return names[node.id]
         if isinstance(node,ast.Attribute):
             owner = self.lookup(node.value,names)
-            if not isinstance(owner,(types.ModuleType,type)): raise UnsupportedType('Annotation attributes must reference a module or class')
+            if not isinstance(owner,(types.ModuleType,type)):
+                raise UnsupportedType('Annotation attributes must reference a module or class')
             return vars(owner)[node.attr]
         raise UnsupportedType('Unsupported output type expression; annotation calls are not executed')
 
     def compile(self, annotation, names=None):
         names = self.names if names is None else names
-        if isinstance(annotation,Contract): return annotation
+        if isinstance(annotation,Contract):
+            return annotation
         if isinstance(annotation,typing.ForwardRef): annotation = annotation.__forward_arg__
         if isinstance(annotation,str): return self.node(annotation_node(annotation),names)
         return self.value(annotation,names)
@@ -245,18 +247,22 @@ class Compiler:
 
     def generic(self,base,args,label,names):
         origin = typing.get_origin(base) or base
-        if origin in (typing.Union,types.UnionType): return Contract('union',label,args)
-        if base is typing.Optional: return Contract('union',label,args+(Contract('null','None'),))
+        if origin in (typing.Union,types.UnionType):
+            return Contract('union',label,args)
+        if base is typing.Optional:
+            return Contract('union',label,args+(Contract('null','None'),))
         if base in READ_ONLY_TYPES:
             raise UnsupportedType('ReadOnly needs mutation interception; it cannot be silently reduced to a value type')
         qualifiers = (typing.Required,typing.NotRequired,typing.Final,typing.ClassVar)
         if base in qualifiers:
-            if len(args) != 1: raise UnsupportedType('Qualifier requires one type')
+            if len(args) != 1:
+                raise UnsupportedType('Qualifier requires one type')
             return Contract('qualifier',label,args,qualifier=base._name)
         containers = {list:'list',set:'set',frozenset:'frozenset',dict:'dict',abc.Sequence:'sequence',abc.Mapping:'mapping'}
         if origin in containers:
             expected = 2 if origin in (dict,abc.Mapping) else 1
-            if len(args) != expected: raise UnsupportedType(f'{label}: wrong number of type parameters')
+            if len(args) != expected:
+                raise UnsupportedType(f'{label}: wrong number of type parameters')
             return Contract(containers[origin],label,args)
         if origin is tuple:
             if len(args) == 2 and args[1] is Ellipsis: return Contract('tuple_many',label,args[:1])
@@ -264,25 +270,30 @@ class Compiler:
         if origin in (abc.Generator,abc.Iterator,abc.Iterable,abc.AsyncGenerator,abc.AsyncIterator,abc.AsyncIterable):
             async_kind = origin in (abc.AsyncGenerator,abc.AsyncIterator,abc.AsyncIterable)
             expected = 3 if origin is abc.Generator else 2 if origin is abc.AsyncGenerator else 1
-            if len(args) != expected: raise UnsupportedType('Wrong iterator type argument count')
+            if len(args) != expected:
+                raise UnsupportedType('Wrong iterator type argument count')
             padded = args + (Contract('null','None'),)*(3-len(args))
             return Contract('async_generator' if async_kind else 'generator',label,padded)
         if origin is type:
-            if len(args) != 1: raise UnsupportedType('type requires one parameter')
+            if len(args) != 1:
+                raise UnsupportedType('type requires one parameter')
             return Contract('type',label,args)
         if isinstance(base,TYPE_ALIAS_TYPES): return self.alias(base,names,args,label)
         if isinstance(base,type) and (getattr(base,'__type_params__',()) or getattr(base,'__parameters__',())):
             parameters = getattr(base,'__type_params__',()) or base.__parameters__
-            if len(parameters) != len(args): raise UnsupportedType('Generic type argument count mismatch')
+            if len(parameters) != len(args):
+                raise UnsupportedType('Generic type argument count mismatch')
             return self.class_contract(base,names | {p.__name__: a for p,a in zip(parameters,args)},label)
         raise UnsupportedType(f'Unsupported generic output type: {label}; no unchecked fallback is allowed')
 
     def alias(self,alias,names,args=(),label=None):
         parameters = alias.__type_params__
-        if parameters and len(args) != len(parameters): raise UnsupportedType('Generic alias requires its type arguments')
+        if parameters and len(args) != len(parameters):
+            raise UnsupportedType('Generic alias requires its type arguments')
         scope = self.module_names(alias,names) | {p.__name__:a for p,a in zip(parameters,args)}
         key = (id(alias),tuple(id(a) for a in args))
-        if key in self.cache: return self.cache[key]
+        if key in self.cache:
+            return self.cache[key]
         result = Contract('alias',label or alias.__name__)
         self.cache[key] = result
         if annotationlib is not None and hasattr(alias,'evaluate_value'):
@@ -300,7 +311,8 @@ class Compiler:
 
     def class_contract(self,target,names,label=None):
         key = (id(target),label or target.__qualname__)
-        if key in self.cache: return self.cache[key]
+        if key in self.cache:
+            return self.cache[key]
         if getattr(target,'_is_protocol',False) and target not in VALIDATORS:
             raise UnsupportedType('Protocol requires a registered validator; structural call signatures cannot be proven by isinstance')
         record = typing.is_typeddict(target)
@@ -316,13 +328,16 @@ class Compiler:
             fields.update(annotations_of(base))
         for name, source in fields.items():
             contract = self.compile(source,scope)
-            if contract.marker == 'ClassVar': continue
+            if contract.marker == 'ClassVar':
+                continue
             result.fields[name] = contract
         if record:
             result.required = set(target.__required_keys__)
             for name, contract in result.fields.items():
-                if contract.marker == 'Required': result.required.add(name)
-                elif contract.marker == 'NotRequired': result.required.discard(name)
+                if contract.marker == 'Required':
+                    result.required.add(name)
+                elif contract.marker == 'NotRequired':
+                    result.required.discard(name)
         else:
             result.required = set(result.fields)
         return result
@@ -336,18 +351,21 @@ class Compiler:
         if target in (typing.Never,typing.NoReturn): return Contract('never',str(target))
         if target is typing.Self:
             owner = names.get('self',names.get('cls'))
-            if owner is None: raise UnsupportedType('Self requires an instance or class scope')
+            if owner is None:
+                raise UnsupportedType('Self requires an instance or class scope')
             return self.value(owner if isinstance(owner,type) else type(owner),names)
         if target is typing.LiteralString:
             raise UnsupportedType('LiteralString requires static provenance checking; use str for a runtime string contract')
         if isinstance(target,TYPE_ALIAS_TYPES): return self.alias(target,names)
         if isinstance(target,typing.TypeVar):
             substituted = names.get(target.__name__)
-            if isinstance(substituted,Contract): return substituted
+            if isinstance(substituted,Contract):
+                return substituted
             choices = target.__constraints__ or ((target.__bound__,) if target.__bound__ else ())
             return Contract('typevar',target.__name__,tuple(self.compile(v,names) for v in choices),python_type=target)
         if isinstance(target,typing.NewType): return self.compile(target.__supertype__,names)
-        if isinstance(target,(str,typing.ForwardRef)): return self.compile(target,names)
+        if isinstance(target,(str,typing.ForwardRef)):
+            return self.compile(target,names)
         origin,args = typing.get_origin(target),typing.get_args(target)
         if origin is typing.Literal: return Contract('literal',str(target),args)
         if origin is typing.Annotated:
@@ -359,7 +377,8 @@ class Compiler:
             any_type = Contract('any','Any')
             if target is tuple: return Contract('tuple_many','tuple',(any_type,))
             return self.generic(target,(any_type,any_type) if target is dict else (any_type,),target.__name__,names)
-        if not isinstance(target,type): raise UnsupportedType('Annotation is not a supported Python type')
+        if not isinstance(target,type):
+            raise UnsupportedType('Annotation is not a supported Python type')
         return self.class_contract(target,names)
 
 

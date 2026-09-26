@@ -200,7 +200,8 @@ class TypeRuntime:
         frame = inspect.currentframe().f_back
         try:
             scope = frame.f_locals.get(SCOPE)
-            if not isinstance(scope,Scope) or scope.failed: return
+            if not isinstance(scope,Scope) or scope.failed:
+                return
             self.check_frame(frame)
             if scope.has_return and scope.returned:
                 contract = scope.returned.args[2] if scope.returned.kind in ('generator','async_generator') and frame.f_code.co_flags & (inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR) else scope.returned
@@ -250,7 +251,8 @@ class TypeRuntime:
                     raise
                 except BaseException:
                     throw = getattr(iterator,'throw',None)
-                    if throw is None: raise
+                    if throw is None:
+                        raise
                     try: item = throw(sys.exception())
                     except StopIteration as stop: return stop.value
                 else:

@@ -289,11 +289,11 @@ def _write_keys(root: Path, relative_path: str, updates: dict[str, str]) -> None
     target = root / relative_path
     if not target.resolve().is_relative_to(root.resolve()) or target.is_symlink():
         raise ConfigError("Cannot save an API key outside the project or through a symlink")
-    for parent in (target.parent, *target.parent.parents):
-        if parent == root.parent:
-            break
+    parent = target.parent
+    while parent != root.parent:
         if parent.is_symlink():
             raise ConfigError("Cannot save an API key through a symlinked directory")
+        parent = parent.parent
     if target.exists() and not target.is_file():
         raise ConfigError("Credential path is not a file")
     values = read_env(target) if target.exists() else {}
@@ -697,8 +697,6 @@ def setup(argv: list[str]) -> Path:
             model = _model_id(selected, value)
         else:
             model = old_model
-        if not model:
-            raise ConfigError("Model ID is required; use --model MODEL_ID")
         entry = document.get("model")
         if isinstance(entry, str):
             document["model"] = model
