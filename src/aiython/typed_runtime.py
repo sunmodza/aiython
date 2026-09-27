@@ -379,7 +379,7 @@ class TypeRuntime:
             classes = frozenset(self.classes)
         if classes:
             seen = set()
-            if frame.f_code.co_name == '__init__' and 'self' in frame.f_locals:
+            if frame.f_code.co_name in ('__init__', '__setstate__') and 'self' in frame.f_locals:
                 seen.add(id(frame.f_locals['self']))
             for namespace in (frame.f_locals,frame.f_globals):
                 for name,candidate in namespace.items():
@@ -662,7 +662,10 @@ class TypedTransformer(ast.NodeTransformer):
             yield from TypedTransformer.function_nodes(child)
 
     def visit_ClassDef(self,node):
-        node.decorator_list.insert(0, ast.Attribute(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'types',ast.Load()),'register_class',ast.Load()))
+        first = node.decorator_list[0] if node.decorator_list else node
+        register = ast.Attribute(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'types',ast.Load()),
+                                 'register_class',ast.Load())
+        node.decorator_list.insert(0, ast.copy_location(register, first))
         previous = self.function
         previous_contract = self.delegation_contract
         self.function = False

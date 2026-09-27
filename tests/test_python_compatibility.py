@@ -1019,6 +1019,30 @@ point = Point()
 point.values.append(1)
 print(point.values)
 ''',
+            'dataclass without generated init': '''from dataclasses import dataclass
+@dataclass(slots=True, init=False)
+class Point:
+    x: int
+point = Point()
+print(hasattr(point, 'x'))
+point.x = 3
+print(point.x)
+''',
+            'slotted dataclass custom pickle state': '''from dataclasses import dataclass, field
+import pickle
+@dataclass(frozen=True, slots=True)
+class Point:
+    x: int
+    cached: bool = field(default=False, compare=False)
+    restored: bool = field(default=False, compare=False)
+    def __getstate__(self):
+        return [self.x]
+    def __setstate__(self, state):
+        object.__setattr__(self, 'x', state[0])
+        object.__setattr__(self, 'restored', True)
+point = pickle.loads(pickle.dumps(Point(2)))
+print(point.x, point.restored, hasattr(point, 'cached'))
+''',
             'dataclass descriptor with local annotation': '''from dataclasses import dataclass
 def check():
     class Descriptor:
@@ -1469,6 +1493,14 @@ pair: Pair[int] = Pair(1, 'x')
 print(pair.left, pair.right)
 '''
         if sys.version_info >= (3, 14):
+            cases['decorated class source line'] = '''from dataclasses import dataclass
+def make():
+    @dataclass(slots=True)
+    class Item:
+        value: int
+    return Item
+print(make().__firstlineno__ - make.__code__.co_firstlineno)
+'''
             cases['template string interpolation'] = '''events = []
 def pick():
     events.append('called')

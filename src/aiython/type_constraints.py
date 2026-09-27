@@ -369,7 +369,13 @@ class Contract:
                         if type(private) is dict and name in private:
                             child(contract, private[name], '.' + name)
                             continue
-                    if dataclasses.is_dataclass(self.python_type): fail(f'missing attribute {name}')
+                    if dataclasses.is_dataclass(self.python_type):
+                        params = getattr(self.python_type, '__dataclass_params__', None)
+                        field = getattr(self.python_type, '__dataclass_fields__', {}).get(name)
+                        if (params is None or params.init) and (field is None or
+                                (field.init and field.default is dataclasses.MISSING and
+                                 field.default_factory is dataclasses.MISSING)):
+                            fail(f'missing attribute {name}')
                     continue
                 child(contract,item,'.'+name)
         elif kind == 'type':
