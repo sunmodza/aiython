@@ -14,7 +14,7 @@ from .type_constraints import Contract, ContractCache, TypeViolation, compile_co
 SCOPE = '__aiython_type_scope__'
 _FRAME_SCOPES = ContextVar('aiython_frame_scopes', default=())
 _GENERATOR_SCOPES = {}
-_GENERATOR_SCOPES_LOCK = threading.Lock()
+_GENERATOR_SCOPES_LOCK = threading.RLock()
 
 
 def frame_scope(frame):
@@ -49,7 +49,7 @@ class Scope:
 class TypeRuntime:
     def __init__(self):
         self.classes = weakref.WeakSet()
-        self._classes_lock = threading.Lock()
+        self._classes_lock = threading.RLock()
         self._contract_cache = threading.local()
 
     def contract(self, annotation, namespace):

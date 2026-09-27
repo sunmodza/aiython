@@ -568,6 +568,29 @@ else:
             self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
                              (python.returncode, python.stdout, python.stderr))
 
+    def test_trace_and_profile_callbacks_match_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for callback in ('trace', 'profile'):
+                with self.subTest(callback=callback):
+                    source = f'''import sys
+events = []
+def callback(frame, event, arg):
+    if frame.f_code.co_name == 'target' and event == 'call':
+        events.append('target')
+    return callback
+sys.set{callback}(callback)
+def target(): return 1
+target()
+sys.set{callback}(None)
+print(events)
+'''
+                    python = subprocess.run([sys.executable, '-c', source], cwd=directory,
+                                            capture_output=True, text=True, timeout=10)
+                    aiython = subprocess.run([sys.executable, '-m', 'aiython', '-c', source],
+                                             cwd=directory, capture_output=True, text=True, timeout=10)
+                    self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                                     (python.returncode, python.stdout, python.stderr))
+
     def test_language_constructs_match_cpython(self):
         cases = {
             'empty script': '',
