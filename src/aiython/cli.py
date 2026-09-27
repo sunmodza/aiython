@@ -18,7 +18,7 @@ from pathlib import Path
 from time import perf_counter
 
 from .config import describe, resolve
-from .frontend import parse, runtime_binding_name
+from .frontend import parse
 from .models import AiythonError, ConfigError
 from .runtime import Runtime
 
@@ -38,7 +38,6 @@ class ProjectLoader(importlib.machinery.SourceFileLoader):
 
     def exec_module(self, module):
         source = read_source(self.path)
-        module.__dict__[runtime_binding_name(source)] = self.runtime
         exec(self.runtime.compile_source(source, self.path), module.__dict__)
 
 
@@ -180,10 +179,8 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     runtime = runtime or Runtime(config, agent_factory=agent_factory, stats=stats, trace_plan=trace_plan)
     if compiled_code is None:
         source = read_source(path) if source is None else source
-        runtime_name = runtime_binding_name(source)
         code = runtime.compile_source(source, str(display_path), entry=True)
     else:
-        runtime_name = None
         code = compiled_code
     module = initial_main or types.ModuleType("__main__")
     module.__dict__.update({"__package__": module_spec.parent if module_spec else None,
@@ -194,8 +191,6 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                                           if entry_kind == "bytecode" else
                                           importlib.machinery.SourceFileLoader("__main__", str(display_path)),
                             "__builtins__": builtins})
-    if runtime_name is not None:
-        module.__dict__[runtime_name] = runtime
     if entry_kind != "command":
         module.__dict__.update({"__file__": module_spec.origin if module_spec else str(display_path),
                                 "__cached__": module_spec.cached if module_spec else None})

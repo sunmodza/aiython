@@ -15,7 +15,6 @@ from unittest.mock import Mock, patch
 
 from aiython.capabilities import Store, CapabilityResult, Embeddings
 from aiython.cli import run_script
-from aiython.frontend import RUNTIME_NAME
 from aiython.models import ProfileConfig, ResolvedConfig
 from aiython.providers import LiteLLMProvider
 from aiython.runtime import Runtime
@@ -65,16 +64,18 @@ class OverheadTests(unittest.TestCase):
             first, second = Runtime(config, stats=True), Runtime(config, stats=True)
             code_a = first.compile_source(source, str(path), entry=True)
             code_b = second.compile_source(source, str(path), entry=True)
-            self.assertIs(code_a, code_b)
+            self.assertIsNot(code_a, code_b)
+            self.assertIs(code_a, first.compile_source(source, str(path), entry=True))
             self.assertEqual(second.stats.preparation_cache_hits, 1)
             self.assertIsNot(first.units[str(path)], second.units[str(path)])
             self.assertEqual(set(first.checkpoints), set(second.checkpoints))
-            left, right = {RUNTIME_NAME: first}, {RUNTIME_NAME: second}
+            left, right = {}, {}
             exec(code_a, left)
             exec(code_b, right)
+            self.assertFalse(any(name.startswith('__aiython_runtime') for name in left | right))
             self.assertIsNot(left['answer'], right['answer'])
             changed = Runtime(config)
-            namespace = {RUNTIME_NAME: changed}
+            namespace = {}
             exec(changed.compile_source(source.replace('append(1)', 'append(2)'), str(path), entry=True), namespace)
             self.assertEqual(namespace['answer'], [2])
             self.assertEqual(left['answer'], [1])
@@ -105,7 +106,7 @@ class OverheadTests(unittest.TestCase):
             source = 'items: list[int] = [1, 2]\nalias = items\nmutate(alias)\nanswer = items\n'
             for _ in range(2):
                 runtime = Runtime(config)
-                namespace = {RUNTIME_NAME: runtime, 'mutate': lambda values: values.__setitem__(0, True)}
+                namespace = {'mutate': lambda values: values.__setitem__(0, True)}
                 with self.assertRaises(TypeViolation):
                     exec(runtime.compile_source(source, str(path), entry=True), namespace)
 

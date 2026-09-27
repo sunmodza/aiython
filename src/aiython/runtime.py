@@ -118,12 +118,37 @@ def expression_code(source):
 def snippet_code(source, runtime_name=RUNTIME_NAME):
     from .typed_runtime import TypedTransformer
     tree = TypedTransformer(snippet=True, runtime_name=runtime_name).visit(ast.parse(source, '<aiython-exec>'))
+    tree = RuntimeReferences(runtime_name).visit(tree)
     ast.fix_missing_locations(tree)
     return compile(tree, '<aiython-exec>', 'exec')
 
 
+class RuntimeReferences(ast.NodeTransformer):
+    """Keep generated runtime access out of Python's user-visible namespaces."""
+
+    def __init__(self, runtime_name):
+        self.runtime_name = runtime_name
+
+    def visit_Name(self, node):
+        if node.id == self.runtime_name and isinstance(node.ctx, ast.Load):
+            return ast.copy_location(ast.Constant(self.runtime_name + 'constant'), node)
+        return node
+
+
+def bind_runtime(code, runtime_name, runtime):
+    """Bind an execution's runtime after compiling or retrieving cached code."""
+    marker = runtime_name + 'constant'
+    constants = tuple(bind_runtime(value, runtime_name, runtime)
+                      if isinstance(value, types.CodeType) else
+                      runtime if isinstance(value, str) and value == marker else value
+                      for value in code.co_consts)
+    return (code.replace(co_consts=constants)
+            if any(bound is not original for bound, original in zip(constants, code.co_consts))
+            else code)
+
+
 def internal_binding(name, runtime_name):
-    return (name == runtime_name or name == runtime_name + 'recovery_counts'
+    return (name == runtime_name + 'recovery_counts'
             or name.startswith(runtime_name + 'recovery_attempt_'))
 
 
@@ -215,11 +240,8 @@ class RuntimeBridge:
 
     def exec(self, code: str) -> None:
         prepare = snippet_code if len(code) <= 64 * 1024 else snippet_code.__wrapped__
-        occupied = {name for namespace in (self.frame.f_globals, self.frame.f_locals)
-                    for name, value in namespace.items() if value is not self.manager}
-        runtime_name = runtime_binding_name(code, occupied)
-        compiled = prepare(code, runtime_name)
-        self.frame.f_globals[runtime_name] = self.manager
+        runtime_name = runtime_binding_name(code)
+        compiled = bind_runtime(prepare(code, runtime_name), runtime_name, self.manager)
         from .source_guard import protect_source
         with protect_source(self.manager):
             exec(compiled, self.frame.f_globals, self.namespace())
@@ -620,7 +642,12 @@ class NestedCheckpoints(ast.NodeTransformer):
         return result
 
     def visit_Module(self, node):
-        node.body = self.body(node.body, nested=False)
+        previous = self.scoped_retries
+        self.scoped_retries = True
+        try:
+            node.body = self.body(node.body, nested=False)
+        finally:
+            self.scoped_retries = previous
         return node
 
     def visit_FunctionDef(self, node):
@@ -677,6 +704,7 @@ class Runtime:
 
     def __init__(self, config: ResolvedConfig, *, agent_factory=None, stats=False, trace_plan=False):
         self._lock = threading.RLock()
+        self._bound_codes = OrderedDict()
         self.config = config
         from .typed_runtime import TypeRuntime
         self.types = TypeRuntime(self)
@@ -728,7 +756,7 @@ class Runtime:
             if self.stats.enabled:
                 self.stats.preparation_cache_hits += 1
                 self.stats.prepare_seconds += perf_counter() - started
-            return code
+            return self._bind_compiled(code, unit.runtime_name)
         unit = parse(source, filename)
         if self.stats.enabled:
             self.stats.parse_seconds += perf_counter() - started
@@ -749,7 +777,21 @@ class Runtime:
                 _PREPARED[key] = (code, packet)
                 while len(_PREPARED) > _PREPARED_LIMIT or sum(len(v[1]) for v in _PREPARED.values()) > _PREPARED_BYTES:
                     _PREPARED.popitem(last=False)
-        return code
+        return self._bind_compiled(code, unit.runtime_name, cache=len(source) <= 256 * 1024)
+
+    def _bind_compiled(self, code, runtime_name, *, cache=True):
+        if not cache:
+            return bind_runtime(code, runtime_name, self)
+        with self._lock:
+            bound = self._bound_codes.get(code)
+            if bound is None:
+                bound = bind_runtime(code, runtime_name, self)
+                self._bound_codes[code] = bound
+                if len(self._bound_codes) > _PREPARED_LIMIT:
+                    self._bound_codes.popitem(last=False)
+            else:
+                self._bound_codes.move_to_end(code)
+            return bound
 
     def register(self, unit):
         self.units[unit.filename] = unit
@@ -833,6 +875,8 @@ class Runtime:
                     body.append(install_checkpoint(self, unit, node, key, retry_allowed=retry_allowed,
                                                    scoped_retries=True))
                 guard.body = body
+        ast.fix_missing_locations(tree)
+        tree = RuntimeReferences(unit.runtime_name).visit(tree)
         ast.fix_missing_locations(tree)
         return compile(tree, unit.filename, "exec", dont_inherit=True)
 

@@ -13,14 +13,12 @@ if __name__ == "__mp_main__":
 
     from aiython.cli import ProjectFinder, read_source
     from aiython.config import resolve
-    from aiython.frontend import runtime_binding_name
     from aiython.runtime import Runtime
 
     source_path = Path(os.environ["AIYTHON_SPAWN_ENTRY"])
     runtime = Runtime(resolve(source_path))
     source = read_source(source_path)
-    globals().update({"__file__": str(source_path), "__package__": None,
-                      runtime_binding_name(source): runtime})
+    globals().update({"__file__": str(source_path), "__package__": None})
     sys.path.insert(0, str(source_path.parent))
     sys.meta_path.insert(0, ProjectFinder(runtime))
     exec(runtime.compile_source(source, str(source_path)), globals())

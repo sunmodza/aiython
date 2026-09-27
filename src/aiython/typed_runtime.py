@@ -218,7 +218,7 @@ class TypeRuntime:
             parent = frame.f_back
             while parent:
                 unit = self.manager.units.get(parent.f_code.co_filename) if self.manager is not None else None
-                same_runtime = (parent.f_globals.get(unit.runtime_name) is self.manager if unit else
+                same_runtime = (any(value is self.manager for value in parent.f_code.co_consts) if unit else
                                 self.manager is None and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME))
                 if (frame_scope(parent) or SCOPE in parent.f_locals) and same_runtime:
                     self.check_frame(parent)

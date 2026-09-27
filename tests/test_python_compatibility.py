@@ -104,19 +104,24 @@ atexit.register(lambda: report('EXIT'))
             root = Path(directory)
             (root / 'helper.py').write_text(
                 '__aiython_runtime__ = 11\n'
-                'def read(): return __aiython_runtime__\n')
+                'def read(): return __aiython_runtime__\n'
+                'def internal_names(): return sorted(name for name in globals() '
+                'if name.startswith("__aiython_runtime"))\n')
             (root / 'main.py').write_text(
                 '__aiython_runtime__ = 7\n'
                 '__aiython_runtime_1__ = 8\n'
                 'import helper\n'
-                'print(__aiython_runtime__, __aiython_runtime_1__, helper.read())\n')
+                'print(__aiython_runtime__, __aiython_runtime_1__, helper.read())\n'
+                'print(sorted(name for name in globals() if name.startswith("__aiython_runtime")), '
+                'helper.internal_names())\n')
             package = root / 'runtime_package'
             package.mkdir()
             (package / '__init__.py').write_text('__aiython_runtime__ = 5\n')
             (package / '__main__.py').write_text(
                 'from . import __aiython_runtime__ as parent_value\n'
                 '__aiython_runtime__ = 7\n'
-                'print(parent_value, __aiython_runtime__)\n')
+                'print(parent_value, __aiython_runtime__)\n'
+                'print(sorted(name for name in globals() if name.startswith("__aiython_runtime")))\n')
             for python_args, aiython_args in ((['main.py'], ['main.py']),
                                               (['-m', 'runtime_package'], ['-m', 'runtime_package'])):
                 with self.subTest(python_args=python_args):
@@ -161,7 +166,7 @@ atexit.register(lambda: report('EXIT'))
             self.assertEqual(namespace['result'], (9, 8, 7, 7, str(root)))
             self.assertEqual(agent.observed, [8, 9])
             self.assertEqual([name for name in namespace if name.startswith('__aiython_runtime')],
-                             ['__aiython_runtime_2__', '__aiython_runtime__', '__aiython_runtime_1__'])
+                             ['__aiython_runtime__', '__aiython_runtime_1__'])
 
     def test_ai_request_and_bridge_expose_user_prefixed_names(self):
         case = self
@@ -178,8 +183,7 @@ atexit.register(lambda: report('EXIT'))
                 bridge.set('__aiython_user', 6)
                 bridge.set('__aiython_recovery_counts__', 9)
                 bridge.set('__aiython_recovery_attempt_user', 10)
-                with case.assertRaises(ValueError):
-                    bridge.set('__aiython_runtime_1__', None)
+                bridge.set('__aiython_runtime_1__', 11)
                 return 7
 
         with tempfile.TemporaryDirectory() as directory:
@@ -192,12 +196,13 @@ atexit.register(lambda: report('EXIT'))
                             'answer = choose seven using __aiython_runtime__ and __aiython_user '
                             'and __aiython_recovery_counts__ and __aiython_recovery_attempt_user\n'
                             'result = (__aiython_runtime__, __aiython_user, '
-                            '__aiython_recovery_counts__, __aiython_recovery_attempt_user, answer)\n')
+                            '__aiython_recovery_counts__, __aiython_recovery_attempt_user, '
+                            '__aiython_runtime_1__, answer)\n')
             agent = Agent()
             config = ResolvedConfig(None, root, 'default',
                                     {'default': ProfileConfig('default', 'fake', 'test')})
             namespace = run_script(path, config=config, agent_factory=lambda _: agent)
-            self.assertEqual(namespace['result'], (8, 6, 9, 10, 7))
+            self.assertEqual(namespace['result'], (8, 6, 9, 10, 11, 7))
 
     def test_directory_and_zipapp_execution_match_cpython(self):
         source = '''import atexit, inspect, sys
@@ -695,6 +700,14 @@ print(events)
     def test_language_constructs_match_cpython(self):
         cases = {
             'empty script': '',
+            'no runtime binding in globals': '''print(sorted(name for name in globals() if name.startswith('__aiython_')))
+''',
+            'nested statements leave globals unchanged': '''if True:
+    value = 1
+for item in range(2):
+    value += item
+print(value, sorted(name for name in globals() if name.startswith('__aiython_')))
+''',
             'entry builtins module': '''import builtins
 print(type(__builtins__).__name__, __builtins__ is builtins)
 ''',
