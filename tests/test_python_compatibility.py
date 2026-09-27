@@ -1080,6 +1080,30 @@ def mixed[*Ts](first: int, *args: *Ts) -> tuple[int, *Ts, str]:
 def forward[**P](*args: P.args, **kwargs: P.kwargs): return args, kwargs
 print(collect(1, 'x'), mixed(1, 2, 3), forward(1, x=2))
 '''
+        if sys.version_info >= (3, 14):
+            cases['template string interpolation'] = '''events = []
+def pick():
+    events.append('called')
+    return 3
+template = t"value {pick()!r:>8}"
+print(template.strings, [(item.value, item.expression, item.conversion, item.format_spec)
+                         for item in template.interpolations], events)
+'''
+            cases['deferred annotations and type defaults'] = '''def future(value: Missing) -> Unknown: return value
+class Box[T = int]:
+    item: T
+type Alias = list[Missing]
+print(Box.__type_params__[0].__default__, Alias.__name__,
+      '__annotate__' in Box.__dict__, '__annotate__' in dir(future))
+for target in (future, Box):
+    try: print(target.__annotations__)
+    except NameError as error: print(type(error).__name__)
+'''
+            cases['unparenthesized exception tuple'] = '''try:
+    raise ValueError('bad')
+except ValueError, TypeError:
+    print('caught')
+'''
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'main.py'
             for name, source in cases.items():
