@@ -47,7 +47,8 @@ class Scope:
 
 
 class TypeRuntime:
-    def __init__(self):
+    def __init__(self, manager=None):
+        self.manager = manager
         self.classes = weakref.WeakSet()
         self._classes_lock = threading.RLock()
         self._contract_cache = threading.local()
@@ -216,7 +217,10 @@ class TypeRuntime:
             # Active enclosing scopes can hold annotated aliases to mutated values.
             parent = frame.f_back
             while parent:
-                if (frame_scope(parent) or SCOPE in parent.f_locals) and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME):
+                unit = self.manager.units.get(parent.f_code.co_filename) if self.manager is not None else None
+                same_runtime = (parent.f_globals.get(unit.runtime_name) is self.manager if unit else
+                                self.manager is None and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME))
+                if (frame_scope(parent) or SCOPE in parent.f_locals) and same_runtime:
                     self.check_frame(parent)
                 parent = parent.f_back
         finally: del frame
@@ -333,8 +337,8 @@ class TypeRuntime:
         finally: del frame
 
 
-def helper(name,*args):
-    return ast.Call(ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),name,ast.Load()),list(args),[])
+def helper(name,*args,runtime_name=RUNTIME_NAME):
+    return ast.Call(ast.Attribute(ast.Attribute(ast.Name(runtime_name,ast.Load()),'types',ast.Load()),name,ast.Load()),list(args),[])
 
 
 def literal(value):
@@ -342,11 +346,15 @@ def literal(value):
 
 
 class TypedTransformer(ast.NodeTransformer):
-    def __init__(self, *, snippet=False):
+    def __init__(self, *, snippet=False, runtime_name=RUNTIME_NAME):
         self.snippet = snippet
+        self.runtime_name = runtime_name
         self.declarations = {}
         self.function = False
         self.delegation_contract = False
+
+    def helper(self, name, *args):
+        return helper(name, *args, runtime_name=self.runtime_name)
 
     @staticmethod
     def declarations_in(body):
@@ -369,7 +377,7 @@ class TypedTransformer(ast.NodeTransformer):
         while body and isinstance(body[0],ast.ImportFrom) and body[0].module == '__future__':
             header.append(body[0]); body = body[1:]
         if initialize:
-            initial = ast.Expr(helper('enter_generator_scope' if generator_scope else 'enter_scope',
+            initial = ast.Expr(self.helper('enter_generator_scope' if generator_scope else 'enter_scope',
                                       literal(self.declarations),literal(parameters),literal(returns)))
             ast.copy_location(initial,body[0] if body else header[-1] if header else ast.Constant(None,lineno=1,col_offset=0))
             initial._aiython_scope_initializer = True
@@ -386,7 +394,7 @@ class TypedTransformer(ast.NodeTransformer):
             transformed = self.visit(statement)
             output.extend(transformed if isinstance(transformed,list) else [transformed])
             if not isinstance(statement,(ast.Return,ast.Raise,ast.Break,ast.Continue)):
-                output.append(ast.copy_location(ast.Expr(helper('checkpoint')),statement))
+                output.append(ast.copy_location(ast.Expr(self.helper('checkpoint')),statement))
         self.declarations = previous
         return header+output
 
@@ -397,7 +405,7 @@ class TypedTransformer(ast.NodeTransformer):
         body = self.body(node.body)
         initial = next(i for i,item in enumerate(body) if getattr(item,'_aiython_scope_initializer',False))
         header, enter, statements = body[:initial], body[initial], body[initial+1:]
-        exit_call = ast.copy_location(ast.Expr(helper('exit_scope')), enter)
+        exit_call = ast.copy_location(ast.Expr(self.helper('exit_scope')), enter)
         if statements:
             guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), enter)
             guard._aiython_module_guard = True
@@ -427,14 +435,14 @@ class TypedTransformer(ast.NodeTransformer):
         node.body = self.body(node.body,parameters=parameters,returns=returns,
                               inherited=inherited,generator_scope=is_generator)
         if isinstance(node,ast.AsyncFunctionDef) and is_generator:
-            node.body.append(ast.copy_location(ast.Expr(helper('returned',ast.Constant(None))),node))
+            node.body.append(ast.copy_location(ast.Expr(self.helper('returned',ast.Constant(None))),node))
         else:
-            node.body.append(ast.copy_location(ast.Return(helper('returned',ast.Constant(None))),node))
+            node.body.append(ast.copy_location(ast.Return(self.helper('returned',ast.Constant(None))),node))
         initial = next(i for i,n in enumerate(node.body) if getattr(n,'_aiython_scope_initializer',False))
-        handler = ast.ExceptHandler(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'scope_error_type',ast.Load()),None,
-                                    [ast.Expr(helper('aborted')),ast.Raise()])
-        final = ast.Expr(helper('leaving'))
-        final = ast.Try([final],[],[],[ast.Expr(helper('exit_generator_scope' if is_generator else 'exit_scope'))])
+        handler = ast.ExceptHandler(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'scope_error_type',ast.Load()),None,
+                                    [ast.Expr(self.helper('aborted')),ast.Raise()])
+        final = ast.Expr(self.helper('leaving'))
+        final = ast.Try([final],[],[],[ast.Expr(self.helper('exit_generator_scope' if is_generator else 'exit_scope'))])
         guarded = ast.Try(node.body[initial+1:],[handler],[],[final])
         guarded._aiython_type_guard = True
         ast.copy_location(guarded,node)
@@ -453,7 +461,7 @@ class TypedTransformer(ast.NodeTransformer):
             yield from TypedTransformer.function_nodes(child)
 
     def visit_ClassDef(self,node):
-        node.decorator_list.insert(0, ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),'register_class',ast.Load()))
+        node.decorator_list.insert(0, ast.Attribute(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'types',ast.Load()),'register_class',ast.Load()))
         previous = self.function
         previous_contract = self.delegation_contract
         self.function = False
@@ -461,7 +469,7 @@ class TypedTransformer(ast.NodeTransformer):
         body = self.body(node.body)
         header = body[:1] if isinstance(body[0],ast.Expr) and isinstance(body[0].value,ast.Constant) and isinstance(body[0].value.value,str) else []
         enter, *statements = body[len(header):]
-        exit_call = ast.copy_location(ast.Expr(helper('exit_scope')), node)
+        exit_call = ast.copy_location(ast.Expr(self.helper('exit_scope')), node)
         if statements:
             guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), node)
             guard._aiython_class_guard = True
@@ -481,28 +489,28 @@ class TypedTransformer(ast.NodeTransformer):
 
     def visit_Return(self,node):
         if node.value is None:
-            return [ast.copy_location(ast.Expr(helper('returned',ast.Constant(None))),node),node]
-        node.value = helper('returned',self.visit(node.value))
+            return [ast.copy_location(ast.Expr(self.helper('returned',ast.Constant(None))),node),node]
+        node.value = self.helper('returned',self.visit(node.value))
         return node
 
     def visit_Yield(self,node):
         value = self.visit(node.value) if node.value else ast.Constant(None)
-        node.value = helper('yielded',value)
-        return ast.copy_location(helper('sent',node),node)
+        node.value = self.helper('yielded',value)
+        return ast.copy_location(self.helper('sent',node),node)
 
     def visit_YieldFrom(self,node):
         node.value = self.visit(node.value)
         if self.delegation_contract:
-            node.value = helper('delegate',node.value)
+            node.value = self.helper('delegate',node.value)
         return node
 
     def visit_AnnAssign(self,node):
         if node.value is None: return node
         annotation = ast.unparse(node.annotation)
         if isinstance(node.target,ast.Name):
-            node.value = helper('assignment',self.visit(node.value),ast.Constant(node.target.id),ast.Constant(annotation))
+            node.value = self.helper('assignment',self.visit(node.value),ast.Constant(node.target.id),ast.Constant(annotation))
             return node
-        node.value = helper('expression',self.visit(node.value),ast.Constant(annotation))
+        node.value = self.helper('expression',self.visit(node.value),ast.Constant(annotation))
         return node
 
     def visit_Assign(self,node):
@@ -510,7 +518,7 @@ class TypedTransformer(ast.NodeTransformer):
         if len(node.targets) == 1 and isinstance(node.targets[0],ast.Attribute):
             target = node.targets[0]
             assign = ast.Call(
-                ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),
+                ast.Attribute(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'types',ast.Load()),
                               'assign_attribute',ast.Load()), [], [
                     ast.keyword(arg='value',value=node.value),
                     ast.keyword(arg='owner',value=self.visit(target.value)),
@@ -518,16 +526,16 @@ class TypedTransformer(ast.NodeTransformer):
                 ])
             return ast.copy_location(ast.Expr(assign),node)
         for target in node.targets:
-            if isinstance(target,ast.Name) and not target.id.startswith('__aiython_'):
-                node.value = helper('assignment',node.value,ast.Constant(target.id))
+            if isinstance(target,ast.Name):
+                node.value = self.helper('assignment',node.value,ast.Constant(target.id))
         return node
 
     def visit_AugAssign(self,node):
         names = [node.target.id] if isinstance(node.target,ast.Name) else []
-        return [ast.copy_location(ast.Expr(helper('reassigning',literal(names))),node),node]
+        return [ast.copy_location(ast.Expr(self.helper('reassigning',literal(names))),node),node]
 
     def visit_NamedExpr(self,node):
-        node.value = helper('assignment',self.visit(node.value),ast.Constant(node.target.id))
+        node.value = self.helper('assignment',self.visit(node.value),ast.Constant(node.target.id))
         return node
 
     def visit_If(self,node):
@@ -542,12 +550,12 @@ class TypedTransformer(ast.NodeTransformer):
             result = self.visit(statement)
             output.extend(result if isinstance(result,list) else [result])
             if not isinstance(statement,(ast.Return,ast.Raise,ast.Break,ast.Continue)):
-                output.append(ast.copy_location(ast.Expr(helper('checkpoint')),statement))
+                output.append(ast.copy_location(ast.Expr(self.helper('checkpoint')),statement))
         return output
 
     def visit_For(self,node):
         node.iter = self.visit(node.iter)
-        node.body = [ast.copy_location(ast.Expr(helper('checkpoint')),node)] + self.nested(node.body)
+        node.body = [ast.copy_location(ast.Expr(self.helper('checkpoint')),node)] + self.nested(node.body)
         node.orelse = self.nested(node.orelse)
         return node
     visit_AsyncFor = visit_For
@@ -559,7 +567,7 @@ class TypedTransformer(ast.NodeTransformer):
 
     def visit_With(self,node):
         node.items = [self.visit(item) for item in node.items]
-        node.body = [ast.copy_location(ast.Expr(helper('checkpoint')),node)] + self.nested(node.body)
+        node.body = [ast.copy_location(ast.Expr(self.helper('checkpoint')),node)] + self.nested(node.body)
         return node
     visit_AsyncWith = visit_With
 
@@ -573,8 +581,9 @@ class TypedTransformer(ast.NodeTransformer):
 
 class ExpectedTypes(ast.NodeVisitor):
     """Propagate declared contracts to direct AI values before code generation."""
-    def __init__(self,blocks):
+    def __init__(self,blocks,runtime_name=RUNTIME_NAME):
         self.blocks = blocks
+        self.runtime_name = runtime_name
         self.declarations = {}
         self.returns = None
         self.functions = {}
@@ -587,7 +596,7 @@ class ExpectedTypes(ast.NodeVisitor):
     def apply(self,node,annotation):
         if node is None or not annotation: return
         if (isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute)
-            and isinstance(node.func.value,ast.Name) and node.func.value.id == RUNTIME_NAME
+            and isinstance(node.func.value,ast.Name) and node.func.value.id == self.runtime_name
             and node.func.attr == 'execute' and node.args and isinstance(node.args[0],ast.Constant)):
             self.blocks[node.args[0].value].output_type = annotation
         elif isinstance(node,ast.IfExp):

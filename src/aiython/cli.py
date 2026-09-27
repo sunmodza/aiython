@@ -18,7 +18,7 @@ from pathlib import Path
 from time import perf_counter
 
 from .config import describe, resolve
-from .frontend import RUNTIME_NAME, parse
+from .frontend import parse, runtime_binding_name
 from .models import AiythonError, ConfigError
 from .runtime import Runtime
 
@@ -37,8 +37,9 @@ class ProjectLoader(importlib.machinery.SourceFileLoader):
         self.runtime = runtime
 
     def exec_module(self, module):
-        module.__dict__[RUNTIME_NAME] = self.runtime
-        exec(self.runtime.compile_source(read_source(self.path), self.path), module.__dict__)
+        source = read_source(self.path)
+        module.__dict__[runtime_binding_name(source)] = self.runtime
+        exec(self.runtime.compile_source(source, self.path), module.__dict__)
 
 
 class ProjectFinder(importlib.abc.MetaPathFinder):
@@ -177,8 +178,13 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     config = config or resolve(config_source, config_path=config_path, profile=profile, force_profile=force_profile)
     config_seconds = resolved_seconds if resolved_seconds is not None else perf_counter() - started
     runtime = runtime or Runtime(config, agent_factory=agent_factory, stats=stats, trace_plan=trace_plan)
-    code = (compiled_code if compiled_code is not None else
-            runtime.compile_source(read_source(path) if source is None else source, str(display_path), entry=True))
+    if compiled_code is None:
+        source = read_source(path) if source is None else source
+        runtime_name = runtime_binding_name(source)
+        code = runtime.compile_source(source, str(display_path), entry=True)
+    else:
+        runtime_name = None
+        code = compiled_code
     module = initial_main or types.ModuleType("__main__")
     module.__dict__.update({"__package__": module_spec.parent if module_spec else None,
                             "__spec__": module_spec,
@@ -187,8 +193,9 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                                           importlib.machinery.SourcelessFileLoader("__main__", str(display_path))
                                           if entry_kind == "bytecode" else
                                           importlib.machinery.SourceFileLoader("__main__", str(display_path)),
-                            RUNTIME_NAME: runtime,
                             "__builtins__": builtins})
+    if runtime_name is not None:
+        module.__dict__[runtime_name] = runtime
     if entry_kind != "command":
         module.__dict__.update({"__file__": module_spec.origin if module_spec else str(display_path),
                                 "__cached__": module_spec.cached if module_spec else None})

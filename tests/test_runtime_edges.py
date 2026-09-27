@@ -40,7 +40,7 @@ class RuntimeBridgeEdgeTests(unittest.TestCase):
 
     def test_eval_code_object_binding_and_unknown_handle_validation(self):
         self.assertEqual(self.bridge.eval(compile('1 + 2', '<test>', 'eval')), 3)
-        for name in ('not a name', '__aiython_hidden'):
+        for name in ('not a name', '__aiython_runtime__'):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'non-reserved'):
                 self.bridge.set(name, 1)
         with self.assertRaisesRegex(ValueError, 'Unknown object handle'):

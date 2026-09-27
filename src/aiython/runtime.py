@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from collections.abc import MutableMapping
 from typing import Any
 
-from .frontend import RUNTIME_NAME, Unit
+from .frontend import RUNTIME_NAME, Unit, runtime_binding_name
 from .models import (AgentRequest, AiythonError, ConfigError, DirectiveContext,
                      RecoveryDecision, RecoveryRequest, ResolvedConfig, SourceSpan)
 from .stats import Stats
@@ -115,11 +115,16 @@ def expression_code(source):
 
 
 @lru_cache(maxsize=128)
-def snippet_code(source):
+def snippet_code(source, runtime_name=RUNTIME_NAME):
     from .typed_runtime import TypedTransformer
-    tree = TypedTransformer(snippet=True).visit(ast.parse(source, '<aiython-exec>'))
+    tree = TypedTransformer(snippet=True, runtime_name=runtime_name).visit(ast.parse(source, '<aiython-exec>'))
     ast.fix_missing_locations(tree)
     return compile(tree, '<aiython-exec>', 'exec')
+
+
+def internal_binding(name, runtime_name):
+    return (name == runtime_name or name == runtime_name + 'recovery_counts'
+            or name.startswith(runtime_name + 'recovery_attempt_'))
 
 
 # Calling type's built-in descriptors bypasses user metaclass __getattribute__
@@ -210,8 +215,11 @@ class RuntimeBridge:
 
     def exec(self, code: str) -> None:
         prepare = snippet_code if len(code) <= 64 * 1024 else snippet_code.__wrapped__
-        compiled = prepare(code)
-        self.namespace()[RUNTIME_NAME] = self.manager
+        occupied = {name for namespace in (self.frame.f_globals, self.frame.f_locals)
+                    for name, value in namespace.items() if value is not self.manager}
+        runtime_name = runtime_binding_name(code, occupied)
+        compiled = prepare(code, runtime_name)
+        self.frame.f_globals[runtime_name] = self.manager
         from .source_guard import protect_source
         with protect_source(self.manager):
             exec(compiled, self.frame.f_globals, self.namespace())
@@ -221,7 +229,9 @@ class RuntimeBridge:
         return self.eval(name)
 
     def set(self, name: str, value: Any) -> None:
-        if not name.isidentifier() or name.startswith("__aiython_"):
+        unit = self.manager.units.get(self.frame.f_code.co_filename)
+        runtime_name = unit.runtime_name if unit else RUNTIME_NAME
+        if not name.isidentifier() or internal_binding(name, runtime_name):
             raise ValueError("Binding must be a non-reserved Python identifier")
         self.manager.types.assignment_in(self.frame, value, name)
         self.namespace()[name] = value
@@ -366,10 +376,12 @@ class RuntimeBridge:
         while tb:
             frame = tb.tb_frame
             if frame.f_code.co_filename in self.manager.units:
+                unit = self.manager.units[frame.f_code.co_filename]
+                runtime_name = unit.runtime_name if unit is not None else RUNTIME_NAME
                 result.append({"filename": frame.f_code.co_filename, "line": tb.tb_lineno,
                                "name": frame.f_code.co_name, "active": frame is self.frame,
                                "locals": {k: self.handle(v) for k, v in frame.f_locals.items()
-                                          if not k.startswith("__aiython_")}})
+                                          if not internal_binding(k, runtime_name)}})
             tb = tb.tb_next
         return result
 
@@ -377,6 +389,7 @@ class RuntimeBridge:
 class DynamicNames(ast.NodeTransformer):
     def __init__(self, unit: Unit):
         self.table = symtable.symtable(unit.transformed, unit.filename, "exec")
+        self.runtime_name = unit.runtime_name
         self.used_tables: set[int] = set()
 
     def in_scope(self, name: str, line: int, body):
@@ -446,7 +459,7 @@ class DynamicNames(ast.NodeTransformer):
         return node
 
     def visit_Name(self, node):
-        if not isinstance(node.ctx, ast.Load) or node.id.startswith("__aiython_") or node.id == "super":
+        if not isinstance(node.ctx, ast.Load) or node.id == self.runtime_name or node.id == "super":
             # Keep CPython's compiler recognition of zero-argument super(),
             # which creates the implicit __class__ closure cell.
             return node
@@ -457,7 +470,7 @@ class DynamicNames(ast.NodeTransformer):
         except KeyError:
             return node
         if symbol.is_global() and not symbol.is_declared_global():
-            call = ast.Call(ast.Attribute(ast.Name(RUNTIME_NAME, ast.Load()), "lookup", ast.Load()),
+            call = ast.Call(ast.Attribute(ast.Name(self.runtime_name, ast.Load()), "lookup", ast.Load()),
                             [ast.Constant(node.id)], [])
             return ast.copy_location(call, node)
         return node
@@ -466,8 +479,9 @@ class DynamicNames(ast.NodeTransformer):
 class AsyncCalls(ast.NodeTransformer):
     """Await suspended AI calls in coroutines without changing Python scheduling."""
 
-    def __init__(self):
+    def __init__(self, runtime_name=RUNTIME_NAME):
         self.in_async = False
+        self.runtime_name = runtime_name
 
     def _body(self, node, active):
         previous = self.in_async
@@ -505,7 +519,7 @@ class AsyncCalls(ast.NodeTransformer):
         node = self.generic_visit(node)
         if (self.in_async and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == RUNTIME_NAME and node.func.attr == "execute"):
+                and node.func.value.id == self.runtime_name and node.func.attr == "execute"):
             node.func.attr = "aexecute"
             return ast.copy_location(ast.Await(value=node), node)
         return node
@@ -513,6 +527,7 @@ class AsyncCalls(ast.NodeTransformer):
 
 def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, scoped_retries=False):
     """Catch one statement without replaying statements before it."""
+    runtime_name = unit.runtime_name
     target = None
     if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
         target = node.targets[0].id
@@ -531,26 +546,26 @@ def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, scoped_r
             "while True:\n"
             "    try:\n"
             "        pass\n"
-            f"    except {RUNTIME_NAME}.error_type:\n"
-            f"        if {RUNTIME_NAME}.recover({key!r}, {RUNTIME_NAME}.current_exception()):\n"
+            f"    except {runtime_name}.error_type:\n"
+            f"        if {runtime_name}.recover({key!r}, {runtime_name}.current_exception()):\n"
             "            continue\n"
             "        break\n"
             "    else:\n"
-            f"        {RUNTIME_NAME}.clear_recovery_count({key!r})\n"
+            f"        {runtime_name}.clear_recovery_count({key!r})\n"
             "        break\n"
         ).body[0]
         attempt = template.body[0]
     else:
-        counter = '__aiython_recovery_attempt_' + hashlib.sha256(key.encode()).hexdigest()[:16]
+        counter = runtime_name + 'recovery_attempt_' + hashlib.sha256(key.encode()).hexdigest()[:16]
         template = ast.parse(
             "if True:\n"
             f"    {counter} = 0\n"
             "    while True:\n"
             "        try:\n"
             "            pass\n"
-            f"        except {RUNTIME_NAME}.error_type:\n"
+            f"        except {runtime_name}.error_type:\n"
             f"            {counter} += 1\n"
-            f"            if {RUNTIME_NAME}.recover({key!r}, {RUNTIME_NAME}.current_exception(), {counter}):\n"
+            f"            if {runtime_name}.recover({key!r}, {runtime_name}.current_exception(), {counter}):\n"
             "                continue\n"
             "            break\n"
             "        else:\n"
@@ -582,14 +597,13 @@ class NestedCheckpoints(ast.NodeTransformer):
         self.runtime, self.unit, self.serial = runtime, unit, 0
         self.scoped_retries = False
 
-    @staticmethod
-    def generated(node):
+    def generated(self, node):
         if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
             return False
         func = node.value.func
         while isinstance(func, ast.Attribute):
             func = func.value
-        return isinstance(func, ast.Name) and func.id == RUNTIME_NAME
+        return isinstance(func, ast.Name) and func.id == self.unit.runtime_name
 
     def body(self, statements, *, nested=True, preserve_docstring=False, scoped_retries=False):
         result = []
@@ -665,7 +679,7 @@ class Runtime:
         self._lock = threading.RLock()
         self.config = config
         from .typed_runtime import TypeRuntime
-        self.types = TypeRuntime()
+        self.types = TypeRuntime(self)
         from .capabilities import CapabilityRuntime
         self.capabilities = CapabilityRuntime(config, trace=trace_plan)
         self.agent_factory = agent_factory
@@ -784,7 +798,7 @@ class Runtime:
         linecache.cache[unit.filename] = (len(unit.source), None, unit.source.splitlines(True), unit.filename)
         tree = unit.tree
         from .typed_runtime import ExpectedTypes, TypedTransformer
-        ExpectedTypes(unit.blocks).visit(tree)
+        ExpectedTypes(unit.blocks, unit.runtime_name).visit(tree)
         tables = [symtable.symtable(unit.transformed, unit.filename, "exec")]
         definitions = {(n.name, n.lineno): min([n.lineno, *(d.lineno for d in n.decorator_list)])
                        for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
@@ -797,9 +811,9 @@ class Runtime:
                 s.get_name() for s in table.get_symbols() if s.is_declared_global()}
         if unit.blocks:
             tree = DynamicNames(unit).visit(tree)
-        tree = TypedTransformer().visit(tree)
+        tree = TypedTransformer(runtime_name=unit.runtime_name).visit(tree)
         if unit.blocks and any(isinstance(node, ast.AsyncFunctionDef) for node in ast.walk(tree)):
-            tree = AsyncCalls().visit(tree)
+            tree = AsyncCalls(unit.runtime_name).visit(tree)
         tree = NestedCheckpoints(self, unit).visit(tree)
         ast.fix_missing_locations(tree)
         if entry:
@@ -859,11 +873,12 @@ class Runtime:
 
     def request(self, statement, span, unit, frame, context):
         profile, prompts, agent = self.selection(context)
-        objects = {k: v for k, v in frame.f_locals.items() if not k.startswith("__aiython_")}
+        objects = {k: v for k, v in frame.f_locals.items()
+                   if not internal_binding(k, unit.runtime_name)}
         names = statement_names(statement)
         related = {k: v for k, v in objects.items() if k in names}
         for name in names - related.keys():
-            if name in frame.f_globals and not name.startswith("__aiython_"):
+            if name in frame.f_globals and not internal_binding(name, unit.runtime_name):
                 related[name] = frame.f_globals[name]
         frame_code = self.frame_source(frame).get("code", unit.source)
         return AgentRequest(statement, frame_code, related,
@@ -936,7 +951,7 @@ class Runtime:
             from .typed_runtime import SCOPE, Scope, frame_scope
             scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             counts = (scope.recovery_counts if isinstance(scope, Scope) else
-                      frame.f_locals.setdefault("__aiython_recovery_counts__", {}))
+                      frame.f_locals.setdefault(checkpoint.unit.runtime_name + 'recovery_counts', {}))
             attempt = counts.get(key, 0) + 1
             counts[key] = attempt
         if attempt > 2:

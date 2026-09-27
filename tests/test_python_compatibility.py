@@ -99,6 +99,106 @@ atexit.register(lambda: report('EXIT'))
                     self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
                                      (python.returncode, python.stdout, python.stderr))
 
+    def test_runtime_name_collision_in_entry_and_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'helper.py').write_text(
+                '__aiython_runtime__ = 11\n'
+                'def read(): return __aiython_runtime__\n')
+            (root / 'main.py').write_text(
+                '__aiython_runtime__ = 7\n'
+                '__aiython_runtime_1__ = 8\n'
+                'import helper\n'
+                'print(__aiython_runtime__, __aiython_runtime_1__, helper.read())\n')
+            package = root / 'runtime_package'
+            package.mkdir()
+            (package / '__init__.py').write_text('__aiython_runtime__ = 5\n')
+            (package / '__main__.py').write_text(
+                'from . import __aiython_runtime__ as parent_value\n'
+                '__aiython_runtime__ = 7\n'
+                'print(parent_value, __aiython_runtime__)\n')
+            for python_args, aiython_args in ((['main.py'], ['main.py']),
+                                              (['-m', 'runtime_package'], ['-m', 'runtime_package'])):
+                with self.subTest(python_args=python_args):
+                    python = subprocess.run([sys.executable, *python_args], cwd=root,
+                                            capture_output=True, text=True, timeout=10)
+                    aiython = subprocess.run([sys.executable, '-m', 'aiython', *aiython_args], cwd=root,
+                                             capture_output=True, text=True, timeout=10)
+                    self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                                     (python.returncode, python.stdout, python.stderr))
+
+    def test_ai_source_and_bridge_preserve_user_runtime_name(self):
+        from aiython.frontend import parse
+
+        class Agent:
+            def __init__(self):
+                self.observed = []
+
+            def execute(self, request, bridge):
+                bridge.exec('global __aiython_runtime__\n__aiython_runtime__ += 1\n'
+                            'def generated(): return __aiython_runtime__')
+                self.observed.append(bridge.eval('generated()'))
+                return 7
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'main.py'
+            source = ('import asyncio\n'
+                      'from aiython.collaboration import Group\n'
+                      '__aiython_runtime__ = 7\n'
+                      '__aiython_runtime_1__ = 8\n'
+                      'answer: int = choose seven\n'
+                      'async def choose() -> int:\n'
+                      '    return choose seven\n'
+                      'async_answer = asyncio.run(choose())\n'
+                      'result = (__aiython_runtime__, __aiython_runtime_1__, answer, async_answer, Group().project_root)\n')
+            path.write_text(source)
+            self.assertEqual(parse(source, str(path)).runtime_name, '__aiython_runtime_2__')
+            config = ResolvedConfig(None, root, 'default',
+                                    {'default': ProfileConfig('default', 'fake', 'test')})
+            agent = Agent()
+            namespace = run_script(path, config=config, agent_factory=lambda _: agent)
+            self.assertEqual(namespace['result'], (9, 8, 7, 7, str(root)))
+            self.assertEqual(agent.observed, [8, 9])
+            self.assertEqual([name for name in namespace if name.startswith('__aiython_runtime')],
+                             ['__aiython_runtime_2__', '__aiython_runtime__', '__aiython_runtime_1__'])
+
+    def test_ai_request_and_bridge_expose_user_prefixed_names(self):
+        case = self
+
+        class Agent:
+            def execute(self, request, bridge):
+                case.assertEqual(
+                    {key: request.related_objects[key]
+                     for key in ('__aiython_runtime__', '__aiython_user',
+                                 '__aiython_recovery_counts__', '__aiython_recovery_attempt_user')},
+                    {'__aiython_runtime__': 7, '__aiython_user': 5,
+                     '__aiython_recovery_counts__': 3, '__aiython_recovery_attempt_user': 4})
+                bridge.set('__aiython_runtime__', 8)
+                bridge.set('__aiython_user', 6)
+                bridge.set('__aiython_recovery_counts__', 9)
+                bridge.set('__aiython_recovery_attempt_user', 10)
+                with case.assertRaises(ValueError):
+                    bridge.set('__aiython_runtime_1__', None)
+                return 7
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'main.py'
+            path.write_text('__aiython_runtime__ = 7\n'
+                            '__aiython_user = 5\n'
+                            '__aiython_recovery_counts__ = 3\n'
+                            '__aiython_recovery_attempt_user = 4\n'
+                            'answer = choose seven using __aiython_runtime__ and __aiython_user '
+                            'and __aiython_recovery_counts__ and __aiython_recovery_attempt_user\n'
+                            'result = (__aiython_runtime__, __aiython_user, '
+                            '__aiython_recovery_counts__, __aiython_recovery_attempt_user, answer)\n')
+            agent = Agent()
+            config = ResolvedConfig(None, root, 'default',
+                                    {'default': ProfileConfig('default', 'fake', 'test')})
+            namespace = run_script(path, config=config, agent_factory=lambda _: agent)
+            self.assertEqual(namespace['result'], (8, 6, 9, 10, 7))
+
     def test_directory_and_zipapp_execution_match_cpython(self):
         source = '''import atexit, inspect, sys
 from helper import value
@@ -159,6 +259,7 @@ def report():
     print(sys.argv, sys.orig_argv, sys.path[:2])
     print(vars(main).get('__file__', 'ABSENT'), vars(main).get('__cached__', 'ABSENT'))
     print(type(__loader__).__name__, __package__, __spec__, inspect.currentframe().f_code.co_filename)
+    print(sorted(name for name in globals() if name.startswith('__aiython_runtime')))
 report()
 atexit.register(report)
 ''')
@@ -596,6 +697,30 @@ print(events)
             'empty script': '',
             'entry builtins module': '''import builtins
 print(type(__builtins__).__name__, __builtins__ is builtins)
+''',
+            'runtime binding collision': '''__aiython_runtime__ = 7
+__aiython_runtime_1__ = 8
+print(__aiython_runtime__, __aiython_runtime_1__, f'{__aiython_runtime__}')
+globals()['__aiython_runtime__'] += 1
+print(__aiython_runtime__)
+def local():
+    __aiython_runtime__ = 9
+    return __aiython_runtime__
+class Box:
+    __aiython_runtime__ = 10
+    def read(self): return self.__aiython_runtime__
+print(local(), Box().read())
+''',
+            'other internal-looking user names': '''__aiython_type_scope__ = 3
+__aiython_recovery_counts__ = 4
+__aiython_recovery_attempt_user = 5
+def values():
+    __aiython_type_scope__ = 6
+    return __aiython_type_scope__
+class Box:
+    __aiython_type_scope__ = 7
+print(__aiython_type_scope__, __aiython_recovery_counts__,
+      __aiython_recovery_attempt_user, values(), Box.__aiython_type_scope__)
 ''',
             'entry module metadata': '''print(type(__loader__).__name__, __loader__.name, __loader__.path == __file__)
 print('__annotations__' in globals(), '__annotate__' in globals())

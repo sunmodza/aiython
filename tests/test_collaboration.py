@@ -107,19 +107,22 @@ class CollaborationTests(unittest.TestCase):
             (root / "aiython.toml").write_text('version = 3\nmodel = "openai/test"\n')
             (root / "worker.py").write_text(
                 'from aiython import join\n'
+                '__aiython_runtime__ = 12\n'
                 'def work(ticket):\n'
                 '    with join(ticket) as me:\n'
                 '        me.send("main", {"ok": True})\n'
-                '        return 12\n'
+                '        return __aiython_runtime__\n'
                 'def unused():\n'
                 '    return choose a value\n')
             (root / "main.py").write_text(
+                '__aiython_runtime__ = 7\n'
                 'from concurrent.futures import ProcessPoolExecutor\n'
                 'from multiprocessing import get_all_start_methods, get_context\n'
                 'from pathlib import Path\n'
                 'from aiython import group, worker_entry\n'
                 'if __name__ == "__main__":\n'
                 '    with group() as team:\n'
+                '        assert __aiython_runtime__ == 7\n'
                 '        assert team.project_root == str(Path(__file__).parent)\n'
                 '        answer = []\n'
                 '        for method in ("spawn", "forkserver"):\n'
