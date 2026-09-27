@@ -5,6 +5,7 @@ import ast
 from contextvars import ContextVar
 import dataclasses
 from dataclasses import dataclass, field
+import enum
 import functools
 import inspect
 import sys
@@ -102,11 +103,28 @@ class TypeRuntime:
     def register_class(self, cls):
         if isinstance(cls, type):
             self._check_dataclass_initvars(cls)
+            self._check_enum_members(cls)
             with self._classes_lock:
                 self.classes.add(cls)
                 for member in type.__getattribute__(cls, '__dict__').values():
                     self._track_method(cls, member)
         return cls
+
+    def _check_enum_members(self, cls):
+        if not issubclass(cls, enum.Enum):
+            return
+        members = vars(cls).get('_member_map_', {})
+        annotations = annotations_of(cls)
+        namespace = Compiler.module_names(cls, {}) | {cls.__name__: cls, SELF_OWNER: cls}
+        for name, source in annotations.items():
+            if name not in members:
+                continue
+            contract = self.contract(source, namespace)
+            member = members[name]
+            try:
+                contract.validate(object.__getattribute__(member, '_value_'), name)
+            except TypeViolation:
+                contract.validate(member, name)
 
     def _check_dataclass_initvars(self, cls):
         # A subclass inherits this attribute even when it was not decorated.
@@ -148,6 +166,12 @@ class TypeRuntime:
             if module is not None and kind is vars(module).get(class_name):
                 return True
         return False
+
+    @staticmethod
+    def _enum_class_body(frame, name=None):
+        namespace = frame.f_locals
+        return (isinstance(namespace, enum._EnumDict)
+                and (name is None or name in namespace._member_names))
 
     def _track_method(self, cls, member):
         if type(member) is types.FunctionType:
@@ -276,6 +300,10 @@ class TypeRuntime:
         scope = next((s for s,values in candidates if name in s.declarations or name in s.contracts),candidates[0][0])
         source = annotation or scope.declarations.get(name)
         if annotation: scope.declarations[name] = annotation
+        if self._class_field_placeholder(frame, value) or self._enum_class_body(frame):
+            if name in scope.final_names:
+                raise TypeViolation(f'{name}: Final binding cannot be reassigned')
+            return value
         contract = scope.contracts.get(name)
         if contract is None and source:
             contract = self.contract(source,self.namespace(frame))
@@ -283,8 +311,7 @@ class TypeRuntime:
         if contract:
             if name in scope.final_names:
                 raise TypeViolation(f'{name}: Final binding cannot be reassigned')
-            if not self._class_field_placeholder(frame, value):
-                contract.validate(value,name,bindings=scope.bindings)
+            contract.validate(value,name,bindings=scope.bindings)
             if contract.marker == 'Final': scope.final_names.add(name)
         with self._classes_lock:
             registered = type(value) in self.classes
@@ -339,10 +366,13 @@ class TypeRuntime:
                         check_instances(candidate)
         for scope, values in self.scopes(frame):
             for name, source in scope.declarations.items():
-                if name in values and name not in scope.contracts:
+                if (name in values and name not in scope.contracts
+                        and not self._class_field_placeholder(frame, values[name])
+                        and not self._enum_class_body(frame, name)):
                     scope.contracts[name] = self.contract(source,self.namespace(frame))
             for name, contract in scope.contracts.items():
-                if name in values and not self._class_field_placeholder(frame, values[name]):
+                if (name in values and not self._class_field_placeholder(frame, values[name])
+                        and not self._enum_class_body(frame, name)):
                     contract.validate(values[name],name,bindings=scope.bindings)
 
     def checkpoint(self):

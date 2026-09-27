@@ -403,6 +403,23 @@ class Item(BaseModel):
         self.assertEqual(describe_output('Level',namespace)['enum'],['high','low'])
         json.dumps(describe_output('Literal[Level.HIGH]',namespace))
 
+    def test_annotated_enum_members_check_materialized_value(self):
+        self.assertEqual(self.run_source('''from enum import IntEnum, auto
+class Number(IntEnum):
+    ONE: int = auto()
+answer = Number.ONE.value
+''')['answer'], 1)
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from enum import Enum
+class Item(Enum):
+    ONE: str = 1
+''')
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from enum import auto
+class Item:
+    one: int = auto()
+''')
+
     def test_unsupported_contract_fails_before_model_call(self):
         provider = Mock()
         with self.assertRaises(UnsupportedType):

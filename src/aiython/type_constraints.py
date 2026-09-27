@@ -650,7 +650,8 @@ class Compiler:
             fields.update({name: (source, base) for name, source in annotations_of(base).items()})
         for name, (source, owner) in fields.items():
             contract = self.compile(source, scopes.get(owner, scope))
-            if contract.marker == 'ClassVar' or contract.kind in ('initvar', 'kw_only'):
+            if (contract.marker == 'ClassVar' or contract.kind in ('initvar', 'kw_only')
+                    or (issubclass(target, enum.Enum) and name in target.__members__)):
                 continue
             result.fields[name] = contract
         if record:

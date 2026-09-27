@@ -1036,6 +1036,24 @@ class Color(Enum):
     BLUE = 2
 print([item.name for item in Color])
 ''',
+            'annotated enum members and auto': '''from enum import Enum, IntEnum, StrEnum, Flag, auto
+class Plain(Enum):
+    RED: int = 1
+class Number(IntEnum):
+    RED: int = auto()
+class Text(StrEnum):
+    RED: str = auto()
+class Bits(Flag):
+    RED: int = auto()
+print(Plain.RED.value, Number.RED.value, Text.RED.value, Bits.RED.value)
+''',
+            'self annotated enum member': '''from __future__ import annotations
+from enum import Enum, auto
+class Color(Enum):
+    RED: Color = auto()
+color = Color.RED
+print(color.value)
+''',
             'pattern matching': '''value = ('ok', 3)
 match value:
     case ('ok', number): print(number)
