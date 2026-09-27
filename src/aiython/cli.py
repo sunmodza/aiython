@@ -146,10 +146,10 @@ def module_details(name):
     return spec, source, code
 
 
-def module_source(name, arguments=(), *, runtime=None, explain=False):
+def module_source(name, arguments=(), *, runtime=None, explain=False, interactive=False):
     old_main = sys.modules.get("__main__")
     old_argv, old_orig_argv = sys.argv, sys.orig_argv
-    interpreter_args = interpreter_arguments()
+    interpreter_args = [*interpreter_arguments(), *(['-i'] if interactive else [])]
     initial_main = types.ModuleType("__main__")
     initial_main.__loader__ = importlib.machinery.BuiltinImporter
     initial_main.__builtins__ = builtins
@@ -199,7 +199,7 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                config_path=None, profile=None, force_profile=None, restore_state=True,
                source=None, module_spec=None, module_invocation=None, compiled_code=None, initial_main=None,
                entry_kind="file", entry_argument=None, runtime=None, preparation_started=None,
-               resolved_seconds=None):
+               resolved_seconds=None, interactive=False):
     started = preparation_started if preparation_started is not None else perf_counter()
     if entry_kind == "command":
         argv0 = "-c"
@@ -242,9 +242,17 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                                 "__cached__": module_spec.cached if module_spec else None})
     if sys.version_info < (3, 14):
         module.__dict__.setdefault("__annotations__", {})
+    if interactive:
+        from .typed_runtime import Scope
+        runtime.types.interactive_globals = module.__dict__
+        runtime.types.interactive_scope = Scope()
     old_main = sys.modules.get("__main__")
     old_argv, old_orig_argv, old_path = sys.argv, sys.orig_argv, sys.path[:]
-    interpreter_args = interpreter_arguments()
+    missing_last = object()
+    old_last = ({name: vars(sys).get(name, missing_last)
+                 for name in ('last_type', 'last_value', 'last_exc', 'last_traceback')}
+                if interactive and restore_state else {})
+    interpreter_args = [*interpreter_arguments(), *(['-i'] if interactive else [])]
     old_spawn_entry = os.environ.get("AIYTHON_SPAWN_ENTRY")
     finder = ProjectFinder(runtime)
     execution_started = None
@@ -282,10 +290,37 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
         if entry_kind in ("file", "module"):
             os.environ["AIYTHON_SPAWN_ENTRY"] = str(display_path)
         execution_started = perf_counter()
-        exec(code, module.__dict__)
+        if interactive:
+            try:
+                exec(code, module.__dict__)
+            except BaseException as exc:
+                trace = exc.__traceback__
+                while trace is not None and trace.tb_frame.f_code.co_filename != str(display_path):
+                    trace = trace.tb_next
+                trace = trace or exc.__traceback__
+                sys.last_type = type(exc)
+                sys.last_value = sys.last_exc = exc.with_traceback(trace)
+                sys.last_traceback = trace
+                runtime.types.interactive_scope.failed = False
+                sys.excepthook(type(exc), exc, trace)
+            if entry_kind in ('file', 'bytecode', 'stdin'):
+                module.__dict__.pop('__file__', None)
+                module.__dict__.pop('__cached__', None)
+            from .repl import AiythonConsole
+            banner = ('' if sys.flags.quiet else
+                      f'Python {sys.version} on {sys.platform}\n'
+                      'Type "help", "copyright", "credits" or "license" for more information.')
+            AiythonConsole(runtime, module.__dict__).interact(banner=banner, exitmsg='')
+        else:
+            exec(code, module.__dict__)
         return module.__dict__
     finally:
         if restore_state:
+            for name, value in old_last.items():
+                if value is missing_last:
+                    vars(sys).pop(name, None)
+                else:
+                    setattr(sys, name, value)
             sys.argv = old_argv
             sys.orig_argv = old_orig_argv
             sys.path[:] = old_path
@@ -402,6 +437,7 @@ def parser():
     result.add_argument("--explain", action="store_true", help="Show blocks/checkpoints without executing code")
     result.add_argument("--trace-plan", action="store_true", help="Trace actual capability routes, cache and timings")
     result.add_argument("--stats", action="store_true", help="Report model calls, tools, request bytes and timings on stderr")
+    result.add_argument("-i", "--interactive", action="store_true", help="Enter an interactive console after the program")
     result.add_argument("-m", "--module", dest="module_args", nargs=argparse.REMAINDER,
                         help="Run a Python module as __main__")
     result.add_argument("-c", dest="command_args", nargs=argparse.REMAINDER,
@@ -464,7 +500,8 @@ def main(argv=None):
                 argument_parser.error("-m requires a module name")
             module_invocation, *script_args = args.module_args
             try:
-                module_spec, source, original_code, initial_main = module_source(module_invocation, script_args)
+                module_spec, source, original_code, initial_main = module_source(
+                    module_invocation, script_args, interactive=args.interactive)
             except SyntaxError as exc:
                 # A source file with AI syntax cannot be imported as an ordinary
                 # parent package. A SyntaxError raised *by* package code is a
@@ -484,7 +521,7 @@ def main(argv=None):
                 try:
                     module_spec, source, original_code, initial_main = module_source(
                         module_invocation, script_args, runtime=module_runtime,
-                        explain=args.explain)
+                        explain=args.explain, interactive=args.interactive)
                 except BaseException:
                     module_runtime.capabilities.close()
                     raise
@@ -555,7 +592,8 @@ def main(argv=None):
                    module_spec=module_spec, module_invocation=module_invocation,
                    compiled_code=compiled_code, initial_main=initial_main,
                    entry_kind=entry_kind, entry_argument=entry_argument, runtime=module_runtime,
-                   preparation_started=module_started, resolved_seconds=module_config_seconds)
+                   preparation_started=module_started, resolved_seconds=module_config_seconds,
+                   interactive=args.interactive)
     except AiythonError as exc:
         # Keep the original runtime cause visible without leaking provider internals.
         if exc.__cause__:

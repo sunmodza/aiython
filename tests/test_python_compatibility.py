@@ -758,6 +758,31 @@ print(events)
                     self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
                                      (python.returncode, python.stdout, python.stderr))
 
+    def test_interactive_entries_preserve_main_module_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / 'main.py'
+            script.write_text('value = 3\n')
+            module = root / 'samplemod.py'
+            module.write_text('value = 3\n')
+            app = root / 'app'
+            app.mkdir()
+            (app / '__main__.py').write_text('value = 3\n')
+            entries = ((str(script),), ('-m', 'samplemod'), (str(app),),
+                       ('-c', 'value = 3'))
+            prompt = ('import sys\n'
+                      'print(value, __name__, "__file__" in globals(), '
+                      'sys.orig_argv[1:])\n')
+            for entry in entries:
+                with self.subTest(entry=entry):
+                    python = subprocess.run([sys.executable, '-i', *entry], input=prompt,
+                                            cwd=root, capture_output=True, text=True, timeout=10)
+                    aiython = subprocess.run([sys.executable, '-m', 'aiython', '-i', *entry],
+                                             input=prompt, cwd=root, capture_output=True,
+                                             text=True, timeout=10)
+                    self.assertEqual((aiython.returncode, aiython.stdout),
+                                     (python.returncode, python.stdout))
+
     def test_language_constructs_match_cpython(self):
         cases = {
             'empty script': '',

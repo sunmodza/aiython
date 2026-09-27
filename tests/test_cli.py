@@ -15,7 +15,7 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 from aiython.config import CAPABILITIES, credential, resolve
-from aiython.cli import main, run_repl
+from aiython.cli import main, run_repl, run_script
 from aiython.models import ConfigError
 from aiython.setup import ModelChoice, _catalog, _choose_model, setup
 
@@ -34,7 +34,9 @@ class CLITests(unittest.TestCase):
             main([])
         self.assertIn('2\n', output.getvalue())
         self.assertIn('3\n', output.getvalue())
+        self.assertNotIn('>>>', output.getvalue())
         self.assertIn('Python ', errors.getvalue())
+        self.assertIn('>>>', errors.getvalue())
         self.assertIs(sys.argv, original[0])
         self.assertIs(sys.orig_argv, original[1])
         self.assertEqual(sys.path, original[2])
@@ -122,6 +124,40 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "['']\n")
         self.assertIn('aiython run stats:', result.stderr)
+
+    def test_interactive_script_keeps_values_and_type_scope(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'main.py'
+            path.write_text('value: int = 2\n')
+            output, errors = io.StringIO(), io.StringIO()
+            previous_last = {name: (name in vars(sys), vars(sys).get(name))
+                             for name in ('last_type', 'last_value', 'last_exc', 'last_traceback')}
+            with patch.object(sys, 'stdin', Terminal('answer = value + 1\n'
+                                                       "value = 'bad'\n"
+                                                       "print(answer, value, '__file__' in globals())\n")), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                namespace = run_script(path, interactive=True)
+            self.assertEqual(namespace['answer'], 3)
+            self.assertIn('3 2 False', output.getvalue())
+            self.assertIn('TypeViolation', errors.getvalue())
+            self.assertEqual({name: (name in vars(sys), vars(sys).get(name))
+                              for name in previous_last}, previous_last)
+
+    def test_interactive_flag_enters_console_after_script_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'main.py'
+            path.write_text('value = 3\nraise SystemExit(2)\n')
+            result = subprocess.run([sys.executable, '-m', 'aiython', '-i', str(path)],
+                                    input='import sys\nprint(value, type(sys.last_exc).__name__)\n',
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('3 SystemExit\n', result.stdout)
+            self.assertIn('SystemExit: 2', result.stderr)
+            self.assertNotIn('in run_script', result.stderr)
 
     def test_cli_version_uses_distribution_metadata(self):
         result = subprocess.run([sys.executable, "-m", "aiython", "--version"], capture_output=True, text=True)

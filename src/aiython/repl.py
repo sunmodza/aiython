@@ -3,6 +3,7 @@
 import __future__
 import ast
 import code
+import sys
 
 from .frontend import parse
 from .runtime import bind_runtime
@@ -17,6 +18,11 @@ class AiythonConsole(code.InteractiveConsole):
         super().__init__(locals=namespace, filename='<stdin>')
         self.runtime = runtime
         self.cell_number = 0
+
+    def raw_input(self, prompt=''):
+        sys.stderr.write(prompt)
+        sys.stderr.flush()
+        return input()
 
     def runsource(self, source, filename='<stdin>', symbol='single'):
         cell_filename = f'<stdin:{self.cell_number + 1}>'
