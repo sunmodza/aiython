@@ -44,6 +44,21 @@ class ProjectLoader(importlib.machinery.SourceFileLoader):
         exec(code, module.__dict__)
 
 
+class StaticProjectLoader(ProjectLoader):
+    """Expose a package path during --explain without running its AI source."""
+
+    def __init__(self, name, path, runtime, loaded):
+        super().__init__(name, path, runtime)
+        self.loaded = loaded
+
+    def exec_module(self, module):
+        parent_name, _, child_name = module.__name__.rpartition(".")
+        parent = sys.modules.get(parent_name) if parent_name else None
+        old_value = vars(parent).get(child_name) if parent is not None else None
+        had_value = parent is not None and child_name in vars(parent)
+        self.loaded.append((module, parent, child_name, had_value, old_value))
+
+
 class ProjectFinder(importlib.abc.MetaPathFinder):
     def __init__(self, runtime):
         self.runtime = runtime
@@ -67,6 +82,11 @@ class ProjectFinder(importlib.abc.MetaPathFinder):
 class ModuleStartFinder(ProjectFinder):
     """Transform project imports with AI syntax while -m resolves its target."""
 
+    def __init__(self, runtime, *, explain=False):
+        super().__init__(runtime)
+        self.explain = explain
+        self.static_modules = []
+
     def find_spec(self, fullname, path=None, target=None):
         spec = super().find_spec(fullname, path, target)
         if spec is None:
@@ -77,6 +97,9 @@ class ModuleStartFinder(ProjectFinder):
         try:
             compile(source, spec.origin, "exec", dont_inherit=True)
         except SyntaxError:
+            if self.explain:
+                spec.loader = StaticProjectLoader(fullname, spec.origin, self.runtime,
+                                                  self.static_modules)
             return spec
         return None
 
@@ -122,7 +145,7 @@ def module_details(name):
     return spec, source, code
 
 
-def module_source(name, arguments=(), *, runtime=None):
+def module_source(name, arguments=(), *, runtime=None, explain=False):
     old_main = sys.modules.get("__main__")
     old_argv, old_orig_argv = sys.argv, sys.orig_argv
     interpreter_args = interpreter_arguments()
@@ -131,7 +154,7 @@ def module_source(name, arguments=(), *, runtime=None):
     initial_main.__builtins__ = builtins
     if sys.version_info < (3, 14):
         initial_main.__annotations__ = {}
-    finder = ModuleStartFinder(runtime) if runtime is not None else None
+    finder = ModuleStartFinder(runtime, explain=explain) if runtime is not None else None
     try:
         sys.modules["__main__"] = initial_main
         sys.argv = ["-m", *arguments]
@@ -144,6 +167,14 @@ def module_source(name, arguments=(), *, runtime=None):
     finally:
         if finder is not None:
             sys.meta_path.remove(finder)
+            for module, parent, child_name, had_value, old_value in reversed(finder.static_modules):
+                if sys.modules.get(module.__name__) is module:
+                    sys.modules.pop(module.__name__)
+                if parent is not None and vars(parent).get(child_name) is module:
+                    if had_value:
+                        setattr(parent, child_name, old_value)
+                    else:
+                        delattr(parent, child_name)
         sys.argv = old_argv
         sys.orig_argv = old_orig_argv
         if old_main is not None:
@@ -344,7 +375,7 @@ def main(argv=None):
                 # A source file with AI syntax cannot be imported as an ordinary
                 # parent package. A SyntaxError raised *by* package code is a
                 # program error and must not cause that package to run twice.
-                if args.explain or exc.filename is None:
+                if exc.filename is None:
                     raise
                 traceback = exc.__traceback__
                 while traceback is not None:
@@ -358,10 +389,14 @@ def main(argv=None):
                 module_runtime = Runtime(module_config, stats=args.stats, trace_plan=args.trace_plan)
                 try:
                     module_spec, source, original_code, initial_main = module_source(
-                        module_invocation, script_args, runtime=module_runtime)
+                        module_invocation, script_args, runtime=module_runtime,
+                        explain=args.explain)
                 except BaseException:
                     module_runtime.capabilities.close()
                     raise
+                if args.explain:
+                    module_runtime.capabilities.close()
+                    module_runtime = None
             path = Path(module_spec.origin or (original_code.co_filename if original_code else module_invocation))
             entry_kind = "module"
             if source is None:

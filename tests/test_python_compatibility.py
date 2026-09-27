@@ -415,8 +415,39 @@ atexit.register(report)
                 self.assertEqual((namespace['prefix'], namespace['answer']), (7, 7))
             explanation = subprocess.run([sys.executable, '-m', 'aiython', '--explain', '-m',
                                           'ai_parent_package.task'], cwd=root, capture_output=True, text=True)
-            self.assertNotEqual(explanation.returncode, 0)
-            self.assertIn('SyntaxError', explanation.stderr)
+            self.assertEqual(explanation.returncode, 0, explanation.stderr)
+            self.assertEqual([block['statement'] for block in json.loads(explanation.stdout)['blocks']],
+                             ['decide another number'])
+
+    def test_explain_nested_ai_packages_does_not_execute_parents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / 'outer_package'
+            child = parent / 'inner_package'
+            child.mkdir(parents=True)
+            (parent / '__init__.py').write_text(
+                'raise RuntimeError("outer package executed")\nvalue = decide a value\n')
+            (child / '__init__.py').write_text(
+                'raise RuntimeError("inner package executed")\nvalue = decide another value\n')
+            (child / 'task.py').write_text('answer = determine the answer\n')
+            result = subprocess.run([sys.executable, '-m', 'aiython', '--explain', '-m',
+                                     'outer_package.inner_package.task'], cwd=root,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([block['statement'] for block in json.loads(result.stdout)['blocks']],
+                             ['determine the answer'])
+            runtime = Runtime(ResolvedConfig(None, root))
+            try:
+                with patch('pathlib.Path.cwd', return_value=root), patch.object(sys, 'path', sys.path[:]):
+                    spec, source, code, _ = module_source(
+                        'outer_package.inner_package.task', runtime=runtime, explain=True)
+                self.assertEqual(spec.name, 'outer_package.inner_package.task')
+                self.assertIn('determine the answer', source)
+                self.assertIsNone(code)
+                self.assertNotIn('outer_package', sys.modules)
+                self.assertNotIn('outer_package.inner_package', sys.modules)
+            finally:
+                runtime.capabilities.close()
 
     def test_cli_retries_parent_ai_source_with_one_runtime(self):
         class Agent:
