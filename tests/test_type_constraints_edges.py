@@ -728,6 +728,20 @@ class CompilerEdgeTests(unittest.TestCase):
         self.assertIsNone(tc.describe_output(None, {}))
         self.assertIsNone(tc.validate_output(1, None, {}))
 
+    def test_annotated_metadata_does_not_run_during_contract_compilation(self):
+        calls = []
+        def metadata():
+            calls.append('called')
+            return object()
+
+        contract = tc.compile_contract('Annotated[int, metadata()]',
+                                       {'Annotated': Annotated, 'metadata': metadata})
+        self.assertEqual(calls, [])
+        self.assertEqual(contract.schema()['type'], 'integer')
+        contract.validate(2)
+        with self.assertRaises(tc.TypeViolation):
+            contract.validate('bad')
+
     def test_cache_evicts_oldest_and_avoids_invalid_annotation(self):
         cache = tc.ContractCache()
         self.assertEqual(cache.compile('int', {}).kind, 'int')

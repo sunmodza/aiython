@@ -1003,6 +1003,20 @@ point = Point()
 point.values.append(2)
 print(point.x, point.values)
 ''',
+            'pydantic Annotated field': '''from typing import Annotated
+from pydantic import BaseModel, Field
+class Point(BaseModel):
+    x: Annotated[int, Field(ge=0)] = 2
+print(Point().x)
+''',
+            'Annotated metadata evaluation': '''from typing import Annotated
+calls = []
+def marker():
+    calls.append('called')
+    return object()
+value: Annotated[int, marker()] = 2
+print(value, calls)
+''',
             'pydantic private field': '''from pydantic import BaseModel, PrivateAttr
 class Point(BaseModel):
     _cache: list[int] = PrivateAttr(default_factory=list)

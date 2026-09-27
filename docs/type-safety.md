@@ -15,7 +15,7 @@ class TicketAnalysis(TypedDict):
 analysis: TicketAnalysis = analyze the current ticket
 ```
 
-`analysis` is a real Python dict. The model receives its fields, required keys, literal choices and descriptions, even when the type definition is outside the nearby source window. `Annotated` text guides the AI; it is not an executable assertion about sentence length or language. Use a registered validator for additional enforceable conditions.
+`analysis` is a real Python dict. The model receives its fields, required keys, literal choices and descriptions, even when the type definition is outside the nearby source window. Literal `Annotated` text guides the AI; it is not an executable assertion about sentence length or language. Other metadata, such as Pydantic `Field(...)`, is left to its framework and is not executed again by Aiython. Use a registered validator for additional enforceable conditions.
 
 ## Enforcement
 

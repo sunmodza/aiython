@@ -417,9 +417,13 @@ class Compiler:
                     raise UnsupportedType('Unsupported Literal value')
                 return Contract('literal',ast.unparse(node),values)
             if base is typing.Annotated:
-                metadata = [ast.literal_eval(n) for n in nodes[1:]]
+                # Metadata is arbitrary Python data, including calls and
+                # framework field objects. Only literal text is a prompt hint;
+                # checking the wrapped type must not evaluate metadata again.
+                descriptions = [n.value for n in nodes[1:]
+                                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
                 return Contract('annotated',ast.unparse(node),(self.node(nodes[0],names),),
-                                description='; '.join(v for v in metadata if isinstance(v,str)))
+                                description='; '.join(descriptions))
             if base in TYPE_NARROWING_TYPES:
                 if len(nodes) != 1:
                     raise UnsupportedType('Type narrowing requires one target type')
