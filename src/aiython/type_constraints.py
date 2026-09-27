@@ -168,8 +168,12 @@ class Contract:
         elif kind == 'io':
             target = self.args[0]
             if not issubclass(type(value), io.IOBase): fail()
-            if target.kind == 'str' and not issubclass(type(value), io.TextIOBase): fail()
-            if target.kind == 'bytes' and not issubclass(type(value), (io.BufferedIOBase, io.RawIOBase)): fail()
+            if issubclass(type(value), io.TextIOBase):
+                child(target, '', '.read()')
+            elif issubclass(type(value), (io.BufferedIOBase, io.RawIOBase)):
+                child(target, b'', '.read()')
+            elif target.kind != 'any':
+                fail('stream data type cannot be determined without reading it')
         elif kind in ('pattern', 'match'):
             expected = re.Pattern if kind == 'pattern' else re.Match
             if type(value) is not expected: fail()
@@ -320,8 +324,8 @@ class Compiler:
         if origin is abc.Callable:
             return Contract('callable',label)
         if origin is typing.IO:
-            if len(args) != 1 or args[0].kind not in ('str', 'bytes', 'any'):
-                raise UnsupportedType('IO requires str, bytes, or Any as its stream type')
+            if len(args) != 1:
+                raise UnsupportedType('IO requires one stream type')
             return Contract('io', label, args)
         if origin in (re.Pattern, re.Match):
             if len(args) > 1:

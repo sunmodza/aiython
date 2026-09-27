@@ -1102,11 +1102,12 @@ match: Match[str] | None = pattern.search('aa')
 print(pattern.pattern, match.group() if match else None)
 ''',
             'typed streams': '''import io
-from typing import IO, TextIO, BinaryIO
+from typing import AnyStr, IO, TextIO, BinaryIO
 text: IO[str] = io.StringIO('alpha')
 binary: BinaryIO = io.BytesIO(b'beta')
 def read_text(stream: TextIO) -> str: return stream.read()
-print(read_text(text), binary.read())
+def read_any(stream: IO[AnyStr]) -> AnyStr: return stream.read()
+print(read_text(text), read_any(io.StringIO('gamma')), read_any(binary))
 ''',
         }
         if sys.version_info >= (3, 12):

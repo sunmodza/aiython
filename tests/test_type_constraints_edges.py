@@ -35,6 +35,16 @@ class ContractEdgeTests(unittest.TestCase):
                     contract.validate(invalid)
         tc.compile_contract('typing.IO', {'typing': typing}).validate(text)
         tc.compile_contract('typing.IO[Any]', {'typing': typing}).validate(binary)
+        generic = tc.compile_contract('typing.IO[typing.AnyStr]', {'typing': typing})
+        returned = tc.compile_contract('typing.AnyStr', {'typing': typing})
+        for stream, matching, wrong in ((text, 'text', b'wrong'),
+                                        (binary, b'binary', 'wrong')):
+            with self.subTest(stream=type(stream).__name__):
+                bindings = {}
+                generic.validate(stream, bindings=bindings)
+                returned.validate(matching, bindings=bindings)
+                with self.assertRaises(tc.TypeViolation):
+                    returned.validate(wrong, bindings=bindings)
 
     def test_regex_generic_annotations_check_input_type(self):
         namespace = {'re': re, 'typing': typing}
