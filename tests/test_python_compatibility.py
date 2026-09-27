@@ -1040,6 +1040,16 @@ class Item:
 item = Item(2)
 print(item.marker, item.value, 'input' in vars(item))
 ''',
+            'dataclass string annotation whitespace': '''from dataclasses import dataclass, InitVar
+@dataclass
+class Item:
+    value: ' int ' = 1
+    extra: ' InitVar ' = 2
+    def __post_init__(self, extra):
+        self.value += extra
+item = Item()
+print(item.value, hasattr(item, 'extra'))
+''',
             'dataclass without generated init': '''from dataclasses import dataclass
 @dataclass(slots=True, init=False)
 class Point:
@@ -1073,7 +1083,7 @@ def check():
             instance._value = value
     @dataclass
     class Item:
-        value: Descriptor = Descriptor()
+        value: ' Descriptor ' = Descriptor()
     first, second = Item(), Item(5)
     second.value = 7
     print(first.value, second.value)

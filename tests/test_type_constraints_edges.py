@@ -578,6 +578,11 @@ class ContractEdgeTests(unittest.TestCase):
         with self.assertRaisesRegex(tc.UnsupportedType, 'annotation calls are not executed'):
             tc.compile_contract('type(None)', {'type': lambda value: value})
 
+    def test_string_annotations_allow_surrounding_whitespace(self):
+        tc.compile_contract(' int ', {}).validate(2)
+        self.assertEqual(tc.compile_contract(' dataclasses.InitVar [ int ] ',
+                                             {'dataclasses': tc.dataclasses}).kind, 'initvar')
+
     def test_class_local_annotation_aliases_override_caller_names(self):
         class Item:
             Element = int

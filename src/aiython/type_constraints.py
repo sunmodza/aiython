@@ -96,9 +96,9 @@ def descriptor_field(target, name, source, namespace=None):
     if not isinstance(source, str):
         return False
     try:
-        annotation = ast.parse(source, mode='eval').body
+        annotation = ast.parse(source.strip(), mode='eval').body
         if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-            annotation = ast.parse(annotation.value, mode='eval').body
+            annotation = ast.parse(annotation.value.strip(), mode='eval').body
     except SyntaxError:
         return False
     if isinstance(annotation, ast.Name):
@@ -782,7 +782,7 @@ class Compiler:
 def annotation_node(annotation):
     # Compiler.node only reads this tree. Namespace resolution still happens on
     # every compile, including forward references and mutable class annotations.
-    return ast.parse(annotation, mode='eval').body
+    return ast.parse(annotation.strip(), mode='eval').body
 
 
 class ContractCache:
