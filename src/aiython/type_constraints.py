@@ -91,6 +91,46 @@ class Contract:
     description: str = ''
     qualifier: str | None = None
 
+    def accepts_class(self, candidate, bindings, seen=None):
+        """Check a class supplied to type[T] without instantiating it."""
+        seen = set() if seen is None else seen
+        if id(self) in seen:
+            return False
+        seen = seen | {id(self)}
+        if self.kind == 'any':
+            return True
+        if self.kind == 'null':
+            return candidate is type(None)
+        if self.kind in ('alias', 'annotated', 'qualifier'):
+            return self.args[0].accepts_class(candidate, bindings, seen)
+        if self.kind == 'union':
+            for option in self.args:
+                branch = dict(bindings)
+                if option.accepts_class(candidate, branch, seen):
+                    bindings.update(branch)
+                    return True
+            return False
+        if self.kind == 'typevar':
+            previous = bindings.get(self.python_type)
+            if previous is not None:
+                return candidate is previous
+            if self.args:
+                for option in self.args:
+                    branch = dict(bindings)
+                    if option.accepts_class(candidate, branch, seen):
+                        bindings.update(branch)
+                        break
+                else:
+                    return False
+            bindings[self.python_type] = candidate
+            return True
+        if not isinstance(self.python_type, type):
+            return False
+        try:
+            return issubclass(candidate, self.python_type)
+        except TypeError:
+            return False
+
     @property
     def marker(self):
         if self.qualifier: return self.qualifier
@@ -297,7 +337,7 @@ class Contract:
         elif kind == 'type':
             if not isinstance(value,type): fail()
             target = self.args[0]
-            if target.kind != 'any' and (target.python_type is None or not issubclass(value,target.python_type)):
+            if not target.accepts_class(value, bindings):
                 fail()
         elif kind in ('generator','async_generator'):
             raise UnsupportedType('Lazy iterable contracts must be checked at yield/send boundaries, not by consuming the object')

@@ -1166,6 +1166,15 @@ kind: Type = int
 with context as value:
     print(list(generator), value, list(binary), kind('4'))
 ''',
+            'union class annotations': '''from typing import Annotated, TypeVar
+T = TypeVar('T', int, str)
+def same(kind: type[T], value: T) -> T:
+    return value
+one: type[int | str] = int
+none_type: type[None] = type(None)
+annotated: type[Annotated[int, 'number']] = int
+print(one('2'), none_type(), annotated('3'), same(str, 'four'))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

@@ -471,6 +471,46 @@ class ContractEdgeTests(unittest.TestCase):
         with self.assertRaises(tc.TypeViolation):
             contract.validate(1.5)
 
+    def test_type_contracts_accept_unions_aliases_and_typevars(self):
+        namespace = {'typing': typing}
+        for annotation, valid, invalid in (
+            ('type[int | str]', int, float),
+            ('typing.Type[typing.Union[int, str]]', str, float),
+            ('type[None]', type(None), int),
+            ('type[typing.Annotated[int, "metadata"]]', int, str),
+        ):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                contract.validate(valid)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(invalid)
+
+        alias = tc.TypeAliasType('ClassAlias', int | str)
+        tc.compile_contract('type[ClassAlias]', {'ClassAlias': alias}).validate(str)
+        recursive = tc.TypeAliasType('RecursiveClass', 'int | RecursiveClass')
+        recursive_contract = tc.compile_contract('type[RecursiveClass]',
+                                                 {'RecursiveClass': recursive})
+        recursive_contract.validate(int)
+        with self.assertRaises(tc.TypeViolation):
+            recursive_contract.validate(str)
+
+        variable = TypeVar('ClassVariable', int, str)
+        namespace['ClassVariable'] = variable
+        class_contract = tc.compile_contract('type[ClassVariable]', namespace)
+        value_contract = tc.compile_contract('ClassVariable', namespace)
+        bindings = {}
+        class_contract.validate(int, bindings=bindings)
+        value_contract.validate(3, bindings=bindings)
+        with self.assertRaises(tc.TypeViolation):
+            value_contract.validate('wrong', bindings=bindings)
+        with self.assertRaises(tc.TypeViolation):
+            class_contract.validate(str, bindings=bindings)
+        with self.assertRaises(tc.TypeViolation):
+            class_contract.validate(float, bindings={})
+        reverse_bindings = {}
+        value_contract.validate('first', bindings=reverse_bindings)
+        class_contract.validate(str, bindings=reverse_bindings)
+
     def test_class_custom_validator_and_missing_field(self):
         class Choice:
             value: int
