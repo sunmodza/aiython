@@ -78,7 +78,13 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     if sys.version_info < (3, 14):
         module.__annotations__ = {}
     old_main = sys.modules.get("__main__")
-    old_argv, old_path = sys.argv, sys.path[:]
+    old_argv, old_orig_argv, old_path = sys.argv, sys.orig_argv, sys.path[:]
+    interpreter_args = [sys.executable]
+    script_position = old_orig_argv.index(argv0) if argv0 in old_orig_argv else len(old_orig_argv)
+    for index in range(min(script_position, len(old_orig_argv) - 1)):
+        if old_orig_argv[index] == "-m" and old_orig_argv[index + 1] in ("aiython", "aiython.__main__"):
+            interpreter_args = old_orig_argv[:index]
+            break
     old_spawn_entry = os.environ.get("AIYTHON_SPAWN_ENTRY")
     finder = ProjectFinder(runtime)
     execution_started = None
@@ -97,7 +103,9 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     try:
         sys.modules["__main__"] = module
         sys.argv = [argv0, *arguments]
-        sys.path.insert(0, str(path.parent))
+        sys.orig_argv = [*interpreter_args, argv0, *arguments]
+        if not sys.flags.safe_path:
+            sys.path.insert(0, str(path.parent))
         sys.meta_path.insert(0, finder)
         os.environ["AIYTHON_SPAWN_ENTRY"] = str(display_path)
         execution_started = perf_counter()
@@ -106,6 +114,7 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     finally:
         if restore_state:
             sys.argv = old_argv
+            sys.orig_argv = old_orig_argv
             sys.path[:] = old_path
             sys.meta_path.remove(finder)
             if old_spawn_entry is None:

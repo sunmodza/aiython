@@ -11,8 +11,42 @@ from aiython.cli import run_script
 
 
 class PythonCompatibilityTests(unittest.TestCase):
+    def test_safe_path_modes_match_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'main.py'
+            (Path(directory) / 'sibling.py').write_text('value = 2\n')
+            path.write_text('''import sys
+print(sys.flags.safe_path, sys.path[:2], sys.orig_argv)
+try:
+    import sibling
+except ModuleNotFoundError:
+    print('sibling unavailable')
+else:
+    print(sibling.value)
+''')
+            for flag in ('-I', '-P'):
+                with self.subTest(flag=flag):
+                    python = subprocess.run([sys.executable, flag, str(path)],
+                                            capture_output=True, text=True)
+                    aiython = subprocess.run([sys.executable, flag, '-m', 'aiython', str(path)],
+                                             capture_output=True, text=True)
+                    self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                                     (python.returncode, python.stdout, python.stderr))
+
+    def test_original_arguments_preserve_interpreter_flags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'main.py'
+            path.write_text('import sys\nprint(sys.orig_argv)\n')
+            python = subprocess.run([sys.executable, '-B', str(path), 'one'],
+                                    capture_output=True, text=True)
+            aiython = subprocess.run([sys.executable, '-B', '-m', 'aiython', str(path), 'one'],
+                                     capture_output=True, text=True)
+            self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                             (python.returncode, python.stdout, python.stderr))
+
     def test_embedded_run_restores_host_process_state(self):
         original_argv = sys.argv
+        original_orig_argv = sys.orig_argv
         original_path = sys.path[:]
         original_main = sys.modules.get('__main__')
         with tempfile.TemporaryDirectory() as directory:
@@ -20,6 +54,7 @@ class PythonCompatibilityTests(unittest.TestCase):
             path.write_text('value = 2\n')
             run_script(path)
         self.assertIs(sys.argv, original_argv)
+        self.assertIs(sys.orig_argv, original_orig_argv)
         self.assertEqual(sys.path, original_path)
         self.assertIs(sys.modules.get('__main__'), original_main)
 
@@ -69,11 +104,16 @@ print(type(__builtins__).__name__, __builtins__ is builtins)
             'entry module metadata': '''print(type(__loader__).__name__, __loader__.name, __loader__.path == __file__)
 print('__annotations__' in globals(), '__annotate__' in globals())
 ''',
+            'original argument vector': '''import sys
+print(sys.argv)
+print(sys.orig_argv)
+''',
             'atexit script state': '''import atexit, sys
 def report():
     main = sys.modules.get('__main__')
     print(sys.argv[0], sys.path[0], getattr(main, '__file__', None),
           '__cached__' in globals(), sep=' | ')
+    print(sys.orig_argv)
 atexit.register(report)
 ''',
             'worker script state': '''import sys, threading, time
