@@ -11,6 +11,18 @@ from aiython.cli import run_script
 
 
 class PythonCompatibilityTests(unittest.TestCase):
+    def test_embedded_run_restores_host_process_state(self):
+        original_argv = sys.argv
+        original_path = sys.path[:]
+        original_main = sys.modules.get('__main__')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'main.py'
+            path.write_text('value = 2\n')
+            run_script(path)
+        self.assertIs(sys.argv, original_argv)
+        self.assertEqual(sys.path, original_path)
+        self.assertIs(sys.modules.get('__main__'), original_main)
+
     def test_entry_annotations_follow_python_version(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'main.py'
@@ -56,6 +68,20 @@ print(type(__builtins__).__name__, __builtins__ is builtins)
 ''',
             'entry module metadata': '''print(type(__loader__).__name__, __loader__.name, __loader__.path == __file__)
 print('__annotations__' in globals(), '__annotate__' in globals())
+''',
+            'atexit script state': '''import atexit, sys
+def report():
+    main = sys.modules.get('__main__')
+    print(sys.argv[0], sys.path[0], getattr(main, '__file__', None),
+          '__cached__' in globals(), sep=' | ')
+atexit.register(report)
+''',
+            'worker script state': '''import sys, threading, time
+def worker():
+    time.sleep(0.05)
+    main = sys.modules.get('__main__')
+    print(sys.argv[0], sys.path[0], getattr(main, '__file__', None), sep=' | ')
+threading.Thread(target=worker).start()
 ''',
             'module annotation metadata': '''value: int = 2
 print('__annotations__' in globals(), '__annotate__' in globals())

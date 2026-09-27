@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import builtins
 import importlib.abc
 import importlib.machinery
@@ -58,7 +59,7 @@ class ProjectFinder(importlib.abc.MetaPathFinder):
 
 
 def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, stats=False, trace_plan=False,
-               config_path=None, profile=None, force_profile=None):
+               config_path=None, profile=None, force_profile=None, restore_state=True):
     started = perf_counter()
     argv0 = str(path)
     display_path = path.absolute()
@@ -81,6 +82,18 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     old_spawn_entry = os.environ.get("AIYTHON_SPAWN_ENTRY")
     finder = ProjectFinder(runtime)
     execution_started = None
+    def finish():
+        execution_seconds = perf_counter() - execution_started if execution_started is not None else 0
+        runtime.capabilities.close()
+        if stats:
+            runtime.stats.run = {'total_seconds': perf_counter() - started,
+                                 'config_seconds': config_seconds,
+                                 'execution_seconds': execution_seconds}
+        runtime.stats.report()
+    if not restore_state:
+        # Register before user code so its atexit callbacks run while the
+        # script's argv, import path, and runtime are still available.
+        atexit.register(finish)
     try:
         sys.modules["__main__"] = module
         sys.argv = [argv0, *arguments]
@@ -91,24 +104,24 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
         exec(code, module.__dict__)
         return module.__dict__
     finally:
-        execution_seconds = perf_counter() - execution_started if execution_started is not None else 0
-        sys.argv = old_argv
-        sys.path[:] = old_path
-        sys.meta_path.remove(finder)
-        if old_spawn_entry is None:
-            os.environ.pop("AIYTHON_SPAWN_ENTRY", None)
+        if restore_state:
+            sys.argv = old_argv
+            sys.path[:] = old_path
+            sys.meta_path.remove(finder)
+            if old_spawn_entry is None:
+                os.environ.pop("AIYTHON_SPAWN_ENTRY", None)
+            else:
+                os.environ["AIYTHON_SPAWN_ENTRY"] = old_spawn_entry
+            if old_main is not None:
+                sys.modules["__main__"] = old_main
+            else:
+                sys.modules.pop("__main__", None)
+            finish()
         else:
-            os.environ["AIYTHON_SPAWN_ENTRY"] = old_spawn_entry
-        if old_main is not None:
-            sys.modules["__main__"] = old_main
-        else:
-            sys.modules.pop("__main__", None)
-        runtime.capabilities.close()
-        if stats:
-            runtime.stats.run = {'total_seconds': perf_counter() - started,
-                                 'config_seconds': config_seconds,
-                                 'execution_seconds': execution_seconds}
-        runtime.stats.report()
+            # CPython removes these entry-script attributes before waiting for
+            # non-daemon threads and running atexit callbacks.
+            module.__dict__.pop("__file__", None)
+            module.__dict__.pop("__cached__", None)
 
 
 def parser():
@@ -185,7 +198,8 @@ def main(argv=None):
                                 for c in runtime.checkpoints.values()]}, ensure_ascii=False, indent=2))
             return
         run_script(path, args.args, config_path=args.config, profile=args.profile,
-                   force_profile=args.force_profile, stats=args.stats, trace_plan=args.trace_plan)
+                   force_profile=args.force_profile, stats=args.stats, trace_plan=args.trace_plan,
+                   restore_state=argv is not None)
     except AiythonError as exc:
         # Keep the original runtime cause visible without leaking provider internals.
         if exc.__cause__:
