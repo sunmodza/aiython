@@ -1030,6 +1030,19 @@ class Point:
     x: int = field(default=1)
 print(Point().x)
 ''',
+            'annotated Python descriptors': '''from functools import cached_property
+class Field:
+    def __set_name__(self, owner, name):
+        self.name = name
+    def __get__(self, obj, owner=None):
+        return 2
+class Item:
+    first: int = Field()
+    second: int = property(lambda self: 3)
+    third: int = cached_property(lambda self: 4)
+item = Item()
+print(item.first, item.second, item.third)
+''',
             'enum': '''from enum import Enum
 class Color(Enum):
     RED = 1

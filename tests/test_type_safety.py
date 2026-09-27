@@ -385,6 +385,17 @@ class Item(BaseModel):
         with self.assertRaises(TypeViolation):
             self.run_source(private + "item = Item()\nitem._cache.append('bad')\n")
 
+    def test_descriptor_annotation_checks_resolved_instance_value(self):
+        prelude = '''class Field:
+    def __get__(self, instance, owner=None):
+        return self.value
+class Item:
+    amount: int = Field()
+'''
+        self.assertEqual(self.run_source(prelude + 'Field.value = 2\nanswer = Item().amount\n')['answer'], 2)
+        with self.assertRaises(TypeViolation):
+            self.run_source(prelude + "Field.value = 'bad'\nitem = Item()\n")
+
     def test_typed_natural_language_keeps_subscript_inside_statement(self):
         from aiython.frontend import parse
         unit = parse('analysis: TicketAnalysis = analyze the ticket from ticket["message"]\n','test.py')

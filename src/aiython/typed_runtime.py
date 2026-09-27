@@ -80,6 +80,7 @@ class TypeRuntime:
         self.method_owners = weakref.WeakKeyDictionary()
         self._classes_lock = threading.RLock()
         self._contract_cache = threading.local()
+        self._active_instance_checks = ContextVar('aiython_active_instance_checks', default=frozenset())
         self.interactive_globals = None
         self.interactive_scope = None
 
@@ -159,6 +160,8 @@ class TypeRuntime:
         kind = type(value)
         if kind is dataclasses.Field:
             return True
+        if inspect.getattr_static(kind, '__get__', None) is not None:
+            return True
         for module_name, class_name in (('pydantic.fields', 'FieldInfo'),
                                         ('pydantic.fields', 'ModelPrivateAttr'),
                                         ('attr._make', '_CountingAttr')):
@@ -172,6 +175,16 @@ class TypeRuntime:
         namespace = frame.f_locals
         return (isinstance(namespace, enum._EnumDict)
                 and (name is None or name in namespace._member_names))
+
+    def _validate_instance(self, value, path, frame):
+        active = self._active_instance_checks.get()
+        if id(value) in active:
+            return
+        token = self._active_instance_checks.set(active | {id(value)})
+        try:
+            compile_contract(original_class(value), self.namespace(frame)).validate(value, path)
+        finally:
+            self._active_instance_checks.reset(token)
 
     def _track_method(self, cls, member):
         if type(member) is types.FunctionType:
@@ -316,7 +329,7 @@ class TypeRuntime:
         with self._classes_lock:
             registered = type(value) in self.classes
         if registered:
-            compile_contract(original_class(value),self.namespace(frame)).validate(value,name)
+            self._validate_instance(value, name, frame)
         return value
 
     def assignment(self,value,name,annotation=None):
@@ -348,11 +361,11 @@ class TypeRuntime:
             if frame.f_code.co_name == '__init__' and 'self' in frame.f_locals:
                 seen.add(id(frame.f_locals['self']))
             def check_instances(candidate):
-                if id(candidate) in seen: return
+                if id(candidate) in seen or id(candidate) in self._active_instance_checks.get(): return
                 seen.add(id(candidate))
                 cls = type(candidate)
                 if cls in classes:
-                    compile_contract(original_class(candidate),self.namespace(frame)).validate(candidate,cls.__qualname__)
+                    self._validate_instance(candidate, cls.__qualname__, frame)
                     try: state = object.__getattribute__(candidate,'__dict__')
                     except AttributeError: state = {}
                     check_instances(state)
