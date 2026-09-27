@@ -448,9 +448,12 @@ class TypedTransformer(ast.NodeTransformer):
         header = body[:1] if isinstance(body[0],ast.Expr) and isinstance(body[0].value,ast.Constant) and isinstance(body[0].value.value,str) else []
         enter, *statements = body[len(header):]
         exit_call = ast.copy_location(ast.Expr(helper('exit_scope')), node)
-        guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), node)
-        guard._aiython_class_guard = True
-        node.body = header + [enter, guard]
+        if statements:
+            guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), node)
+            guard._aiython_class_guard = True
+            node.body = header + [enter, guard]
+        else:
+            node.body = header + [enter, exit_call]
         self.function = previous
         return node
 

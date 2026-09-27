@@ -86,6 +86,10 @@ print(Example.value)
     snapshot = sorted(locals())
 print(Example.snapshot)
 ''',
+            'class with only a docstring': '''class Example:
+    "documentation"
+print(Example.__doc__, sorted(Example.__dict__))
+''',
             'function locals': '''def run(value):
     result = value + 1
     print(sorted(locals()))

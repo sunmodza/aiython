@@ -86,3 +86,12 @@ For live task comparisons against agent baselines, keep acceptance tests, input
 snapshots, model settings, tool permissions and budgets fixed; count failures as
 well as successes. Follow the [evaluation guide](../docs/performance-evaluation.md)
 and collect run wall time, human intervention, token usage and cost separately.
+
+## Standard library syntax check
+
+Run `uv run --locked --python 3.13 python benchmarks/stdlib_syntax.py` from the
+repository root, changing `--python` to test another supported version. The
+checker compares CPython compilation with Aiython's source transformation for
+standard library modules. It processes files in batches to bound memory use.
+Passing this check establishes syntax transformation only; it does not execute
+the modules or establish behavioral compatibility.
