@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 import inspect
 import threading
+import typing
 import weakref
 
 from .frontend import RUNTIME_NAME
@@ -31,6 +32,25 @@ def original_class(value):
         return object.__getattribute__(value, '__orig_class__')
     except AttributeError:
         return type(value)
+
+
+def unconstrained_variadic(source, mode, namespace):
+    if mode == 'args' and source.startswith('*'):
+        return True
+    parameter_name, separator, attribute = source.partition('.')
+    if (mode in ('args', 'kwargs') and separator and attribute == mode and
+            isinstance(namespace.get(parameter_name), typing.ParamSpec)):
+        return True
+    if mode != 'args':
+        return False
+    annotation = ast.parse(source, mode='eval').body
+    if not isinstance(annotation, ast.Subscript) or not isinstance(annotation.slice, ast.Name):
+        return False
+    unpack = annotation.value
+    is_unpack = ((isinstance(unpack, ast.Name) and namespace.get(unpack.id) is typing.Unpack) or
+                 (isinstance(unpack, ast.Attribute) and unpack.attr == 'Unpack' and
+                  isinstance(unpack.value, ast.Name) and namespace.get(unpack.value.id) is typing))
+    return is_unpack and isinstance(namespace.get(annotation.slice.id), typing.TypeVarTuple)
 
 
 @dataclass
@@ -84,7 +104,10 @@ class TypeRuntime:
         scope = Scope(declarations=declarations)
         namespace = self.namespace(frame)
         for name, (source, mode) in (parameters or {}).items():
-            contract = self.contract(source,namespace)
+            # Unbound variadic type parameters have no concrete element types
+            # to check at this call boundary.
+            contract = (Contract('any', 'Any') if unconstrained_variadic(source, mode, namespace)
+                        else self.contract(source,namespace))
             if mode == 'args': contract = Contract('tuple_many',source,(contract,))
             elif mode == 'kwargs': contract = Contract('dict',source,(compile_contract('str',namespace),contract))
             contract.validate(frame.f_locals[name],name,bindings=scope.bindings)
@@ -385,7 +408,13 @@ class TypedTransformer(ast.NodeTransformer):
         # Capture lexical types used only in stringified contracts without executing them.
         names = set()
         for source in list(self.declarations.values()) + [p[0] for p in (parameters or {}).values()] + ([returns] if returns else []):
-            names.update(n.id for n in ast.walk(ast.parse(source,mode='eval')) if isinstance(n,ast.Name))
+            try:
+                annotation = ast.parse(source, mode='eval')
+            except SyntaxError:
+                # Variadic parameter annotations such as *args: *Ts need a
+                # subscription context; their unparsed text is not an expression.
+                annotation = ast.parse(f'tuple[{source}]', mode='eval')
+            names.update(n.id for n in ast.walk(annotation) if isinstance(n,ast.Name))
         if self.function and names:
             capture = ast.If(ast.Constant(False),[ast.Expr(ast.Tuple([ast.Name(n,ast.Load()) for n in sorted(names)],ast.Load()))],[])
             ast.copy_location(capture,body[0] if body else output[0])

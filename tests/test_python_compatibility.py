@@ -1055,7 +1055,23 @@ async def run():
     print([item async for item in generate(3)])
 asyncio.run(run())
 ''',
+            'typing variadic parameters': '''import typing
+from typing import ParamSpec, TypeVarTuple, Unpack
+P = ParamSpec('P')
+Ts = TypeVarTuple('Ts')
+def collect(*args: Unpack[Ts]) -> tuple[Unpack[Ts]]: return args
+def collect_qualified(*args: typing.Unpack[Ts]) -> tuple[*Ts]: return args
+def forward(*args: P.args, **kwargs: P.kwargs): return args, kwargs
+print(collect(1, 'x'), collect_qualified(2, 'y'), forward(1, x=2))
+''',
         }
+        if sys.version_info >= (3, 12):
+            cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
+def mixed[*Ts](first: int, *args: *Ts) -> tuple[int, *Ts, str]:
+    return (first, *args, 'done')
+def forward[**P](*args: P.args, **kwargs: P.kwargs): return args, kwargs
+print(collect(1, 'x'), mixed(1, 2, 3), forward(1, x=2))
+'''
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'main.py'
             for name, source in cases.items():

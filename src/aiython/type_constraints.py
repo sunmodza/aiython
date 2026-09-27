@@ -89,6 +89,11 @@ class Contract:
         elif kind == 'tuple':
             result = {'type': 'array', 'prefixItems': [a.schema(seen) for a in self.args],
                       'minItems': len(self.args), 'maxItems': len(self.args)}
+        elif kind == 'tuple_unpacked':
+            pivot = next(index for index, item in enumerate(self.args) if item.kind == 'unpack_any')
+            result = {'type': 'array', 'minItems': len(self.args) - 1,
+                      'prefixItems': [item.schema(seen) for item in self.args[:pivot]],
+                      'x-python-suffixItems': [item.schema(seen) for item in self.args[pivot + 1:]]}
         elif kind == 'tuple_many': result = {'type':'array', 'items':self.args[0].schema(seen)}
         elif kind in ('dict', 'mapping'):
             result = {'type':'object', 'additionalProperties':self.args[1].schema(seen), 'x-key-schema':self.args[0].schema(seen)}
@@ -158,6 +163,16 @@ class Contract:
                 return
             for index, item in enumerate(value):
                 child(self.args[index] if kind == 'tuple' else self.args[0], item, f'[{index}]')
+        elif kind == 'tuple_unpacked':
+            if type(value) is not tuple: fail()
+            pivot = next(index for index, item in enumerate(self.args) if item.kind == 'unpack_any')
+            suffix = len(self.args) - pivot - 1
+            if len(value) < pivot + suffix: fail('wrong tuple length')
+            for index, contract in enumerate(self.args[:pivot]):
+                child(contract, value[index], f'[{index}]')
+            for index, contract in enumerate(self.args[pivot + 1:]):
+                position = len(value) - suffix + index
+                child(contract, value[position], f'[{position}]')
         elif kind in ('dict','mapping'):
             if type(value) is not dict: fail('a concrete dict is required for deep checking')
             for index, (key,item) in enumerate(value.items()):
@@ -229,9 +244,16 @@ class Compiler:
             if isinstance(node.value,str): return self.compile(node.value,names)
         if isinstance(node,ast.BinOp) and isinstance(node.op,ast.BitOr):
             return Contract('union',ast.unparse(node),(self.node(node.left,names),self.node(node.right,names)))
+        if isinstance(node, ast.Starred) and isinstance(node.value, ast.Name):
+            parameter = names.get(node.value.id)
+            if isinstance(parameter, typing.TypeVarTuple):
+                return Contract('unpack_any', ast.unparse(node), python_type=parameter)
         if isinstance(node,ast.Subscript):
             base = self.lookup(node.value,names)
             nodes = node.slice.elts if isinstance(node.slice,ast.Tuple) else [node.slice]
+            if (base is typing.Unpack and len(nodes) == 1 and isinstance(nodes[0], ast.Name)
+                    and isinstance(names.get(nodes[0].id), typing.TypeVarTuple)):
+                return Contract('unpack_any', ast.unparse(node), python_type=names[nodes[0].id])
             if base is typing.Literal:
                 values = tuple(self.lookup(n,names) if isinstance(n,ast.Attribute) else ast.literal_eval(n) for n in nodes)
                 if any(type(v) not in (str,int,bool,bytes,type(None)) and not isinstance(v,enum.Enum) for v in values):
@@ -266,6 +288,13 @@ class Compiler:
             return Contract(containers[origin],label,args)
         if origin is tuple:
             if len(args) == 2 and args[1] is Ellipsis: return Contract('tuple_many',label,args[:1])
+            unpacked = [index for index, arg in enumerate(args)
+                        if isinstance(arg, Contract) and arg.kind == 'unpack_any']
+            if len(unpacked) == 1:
+                if len(args) == 1: return Contract('tuple_many',label,(Contract('any','Any'),))
+                return Contract('tuple_unpacked',label,args)
+            if unpacked:
+                raise UnsupportedType('Only one variadic tuple parameter can be checked')
             return Contract('tuple',label,args)
         if origin in (abc.Generator,abc.Iterator,abc.Iterable,abc.AsyncGenerator,abc.AsyncIterator,abc.AsyncIterable):
             async_kind = origin in (abc.AsyncGenerator,abc.AsyncIterator,abc.AsyncIterable)

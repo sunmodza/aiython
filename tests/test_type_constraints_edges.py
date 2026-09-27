@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
-from typing import Any, Annotated, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeVar, TypedDict
+from typing import Any, Annotated, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeVar, TypeVarTuple, TypedDict, Unpack
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +14,23 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_variadic_tuple_contract_keeps_fixed_members(self):
+        parameters = {'Ts': TypeVarTuple('Ts'), 'Unpack': Unpack}
+        for annotation in ('tuple[*Ts]', 'tuple[Unpack[Ts]]'):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, parameters)
+                self.assertEqual(contract.kind, 'tuple_many')
+                contract.validate((1, 'x'))
+        contract = tc.compile_contract('tuple[int, *Ts, str]', parameters)
+        schema = contract.schema()
+        self.assertEqual(schema['minItems'], 2)
+        self.assertEqual(schema['prefixItems'][0]['type'], 'integer')
+        self.assertEqual(schema['x-python-suffixItems'][0]['type'], 'string')
+        contract.validate((1, 2, 'x'))
+        for value in ((1,), ('bad', 2, 'x'), (1, 2, 3), [1, 2, 'x']):
+            with self.subTest(value=value), self.assertRaises(tc.TypeViolation):
+                contract.validate(value)
+
     def test_schema_variants_and_recursive_contract(self):
         integer = tc.compile_contract('int', {})
         cases = [
