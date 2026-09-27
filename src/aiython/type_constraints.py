@@ -35,14 +35,19 @@ READ_ONLY_TYPES = tuple({ReadOnly, getattr(typing, "ReadOnly", ReadOnly)})
 TYPE_NARROWING_TYPES = tuple({TypeGuard, TypeIs, typing.TypeGuard,
                               getattr(typing, 'TypeIs', TypeIs)})
 CONCRETE_SEQUENCE_TYPES = {'list':list, 'set':set, 'frozenset':frozenset,
-                           'deque':deque, 'tuple':tuple, 'tuple_many':tuple}
+                           'deque':deque, 'tuple':tuple, 'tuple_many':tuple,
+                           'mutable_set':set}
 CONCRETE_MAPPING_TYPES = {'dict':dict, 'defaultdict':defaultdict,
                           'ordered_dict':OrderedDict, 'counter':Counter}
 SAFE_MAPPING_TYPES = (dict, defaultdict, OrderedDict, Counter)
+SAFE_COLLECTION_TYPES = (list, tuple, set, frozenset, dict, str, bytes,
+                         bytearray, memoryview, range,
+                         deque, defaultdict, OrderedDict, Counter)
 CONTAINER_KINDS = {list:'list', set:'set', frozenset:'frozenset', dict:'dict',
                    deque:'deque', defaultdict:'defaultdict', OrderedDict:'ordered_dict',
                    Counter:'counter', abc.Sequence:'sequence', abc.Mapping:'mapping',
-                   abc.MutableMapping:'mutable_mapping'}
+                   abc.MutableMapping:'mutable_mapping', abc.MutableSequence:'mutable_sequence',
+                   abc.Set:'abstract_set', abc.MutableSet:'mutable_set', abc.Collection:'collection'}
 
 
 class TypeViolation(CapabilityError, TypeError):
@@ -103,8 +108,11 @@ class Contract:
             result = {'x-python-regex': kind, 'x-python-input-type': self.args[0].schema(seen)}
         elif kind in ('str', 'int', 'float', 'bool'):
             result = {'type': {'str':'string', 'int':'integer', 'float':'number', 'bool':'boolean'}[kind]}
-        elif kind in ('list', 'set', 'frozenset', 'sequence', 'deque'):
+        elif kind in ('list', 'set', 'frozenset', 'sequence', 'deque',
+                      'mutable_sequence', 'abstract_set', 'mutable_set'):
             result = {'type': 'array', 'items': self.args[0].schema(seen)}
+        elif kind == 'collection':
+            result = {'x-python-collection-items': self.args[0].schema(seen)}
         elif kind == 'tuple':
             result = {'type': 'array', 'prefixItems': [a.schema(seen) for a in self.args],
                       'minItems': len(self.args), 'maxItems': len(self.args)}
@@ -185,11 +193,16 @@ class Contract:
             if value is not None: fail()
         elif kind in ('str','int','float','bool','bytes','complex'):
             if type(value) is not self.python_type: fail()
-        elif kind in ('list','set','frozenset','sequence','deque','tuple_many','tuple'):
+        elif kind in ('list','set','frozenset','sequence','deque','tuple_many','tuple',
+                      'mutable_sequence','abstract_set','mutable_set','collection'):
             expected = CONCRETE_SEQUENCE_TYPES.get(kind)
             if expected is not None and type(value) is not expected: fail()
-            if kind == 'sequence' and type(value) not in (list,tuple,str,bytes,range):
+            if kind == 'sequence' and type(value) not in (list,tuple,str,bytes,bytearray,memoryview,range):
                 fail('only non-consuming concrete sequences can be checked')
+            if kind == 'mutable_sequence' and type(value) not in (list,bytearray): fail()
+            if kind == 'abstract_set' and type(value) not in (set,frozenset): fail()
+            if kind == 'collection' and type(value) not in SAFE_COLLECTION_TYPES:
+                fail('only non-consuming concrete collections can be checked')
             if kind == 'tuple' and len(value) != len(self.args): fail('wrong tuple length')
             if kind != 'tuple' and self.args[0].kind in PRIMITIVE_KINDS:
                 member = self.args[0]
@@ -352,6 +365,8 @@ class Compiler:
             return Contract('qualifier',label,args,qualifier=base._name)
         if origin in CONTAINER_KINDS:
             expected = 2 if origin in (dict,abc.Mapping,abc.MutableMapping,defaultdict,OrderedDict) else 1
+            if not args:
+                args = (Contract('any', 'Any'),) * expected
             if len(args) != expected:
                 raise UnsupportedType(f'{label}: wrong number of type parameters')
             if origin is Counter:
@@ -530,6 +545,8 @@ class Compiler:
         if isinstance(target,Contract): return target
         if target is None or target is type(None): return Contract('null','None')
         if target is typing.Any: return Contract('any','Any')
+        if target is typing.Tuple:
+            return Contract('tuple_many', 'typing.Tuple', (Contract('any', 'Any'),))
         if target is typing.IO or target is typing.TextIO or target is typing.BinaryIO:
             stream_type = ('str' if target is typing.TextIO else
                            'bytes' if target is typing.BinaryIO else 'any')

@@ -18,6 +18,34 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_abstract_collections_check_known_concrete_values(self):
+        namespace = {'typing': typing}
+        cases = (
+            ('typing.MutableSequence[int]', [1, 2], (1, 2)),
+            ('typing.AbstractSet[str]', frozenset({'x'}), frozenset({1})),
+            ('typing.MutableSet[int]', {1}, frozenset({1})),
+            ('typing.Collection[int]', {1: 'value'}, ['wrong']),
+            ('typing.Sequence[int]', memoryview(b'abc'), ['wrong']),
+        )
+        for annotation, valid, invalid in cases:
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                contract.validate(valid)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(invalid)
+        tc.compile_contract('typing.MutableSequence[int]', namespace).validate(bytearray(b'a'))
+        for annotation, value in (('typing.List', [1, 'x']),
+                                  ('typing.Dict', {'x': 1}),
+                                  ('typing.Collection', {1: 2}),
+                                  ('typing.Sequence', memoryview(b'a')),
+                                  ('typing.Tuple', (1, 'x'))):
+            with self.subTest(annotation=annotation):
+                tc.compile_contract(annotation, namespace).validate(value)
+        empty = tc.compile_contract('typing.Tuple[()]', namespace)
+        empty.validate(())
+        with self.assertRaises(tc.TypeViolation):
+            empty.validate((1,))
+
     def test_abstract_mappings_accept_known_concrete_implementations(self):
         namespace = {'typing': typing}
         for annotation in ('typing.Mapping[str, int]', 'typing.MutableMapping[str, int]'):

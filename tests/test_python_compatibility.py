@@ -1119,6 +1119,17 @@ ordered = OrderedDict(x=2)
 defaulted = defaultdict(int, x=3)
 print(total(ordered), increment(defaulted))
 ''',
+            'abstract collections and bare aliases': '''from typing import AbstractSet, Collection, List, MutableSequence, Sequence, Tuple
+def count(values: Collection[int]) -> int: return len(values)
+def extend(values: MutableSequence[int]) -> list[int]:
+    values.append(2)
+    return list(values)
+def size(values: AbstractSet[str]) -> int: return len(values)
+bare: List = [1, 'x']
+bare_tuple: Tuple = (1, 'x')
+view: Sequence[int] = memoryview(b'A')
+print(count({1: 'one'}), extend(bytearray(b'A')), size(frozenset({'x'})), bare, bare_tuple, list(view))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
