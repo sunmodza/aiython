@@ -36,6 +36,8 @@ Contracts support primitives, `None`, `Any`, unions/Optional, Literal values, An
 
 Primitive checks are strict: no string-to-number conversion, and bool does not pass an int contract. `Any` is an explicit escape from value checking. Bare containers have unconstrained elements. `Final` bindings reject reassignment; `ClassVar` direct writes must target the class.
 
+`TypeAlias` marks an alias declaration and does not constrain the alias object itself. Values annotated with that alias are checked against its target type.
+
 Annotations are interpreted rather than passed to `eval`. On Python 3.14+, Aiython uses string-format annotation introspection; on 3.11–3.13, it reads stored annotations without evaluating strings. Type aliases on 3.12–3.13 use Python's lazy alias value machinery, which can evaluate code supplied by the alias author. Custom annotation machinery and custom validators are trusted Python code, not sandboxed code.
 
 `aiython.type_constraints.register_validator(Class, validator)` supplies a custom runtime predicate. A class validator returns true for a valid value. It can also provide the structural check for a Protocol that Aiython cannot prove automatically.

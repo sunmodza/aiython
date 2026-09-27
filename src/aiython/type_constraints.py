@@ -16,7 +16,7 @@ import inspect
 import sys
 import types
 import typing
-from typing_extensions import ReadOnly, TypeAliasType, TypeGuard, TypeIs
+from typing_extensions import ReadOnly, TypeAlias, TypeAliasType, TypeGuard, TypeIs
 
 try:
     import annotationlib
@@ -484,6 +484,8 @@ class Compiler:
         if isinstance(target,Contract): return target
         if target is None or target is type(None): return Contract('null','None')
         if target is typing.Any: return Contract('any','Any')
+        if target is typing.TypeAlias or target is TypeAlias:
+            return Contract('any', 'TypeAlias')
         if isinstance(target, typing.TypeVarTuple):
             bound = names.get(target, names.get(target.__name__))
             return (Contract('unpack_fixed', target.__name__, bound)

@@ -9,12 +9,22 @@ from types import SimpleNamespace
 from typing import Any, Annotated, Callable, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeGuard, TypeVar, TypeVarTuple, TypedDict, Unpack
 import unittest
 from unittest.mock import patch
-from typing_extensions import TypeIs
+from typing_extensions import TypeAlias, TypeIs
 
 from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_type_alias_marker_allows_alias_declaration(self):
+        marker = tc.compile_contract('TypeAlias', {'TypeAlias': TypeAlias})
+        self.assertEqual(marker.kind, 'any')
+        marker.validate(list[int])
+        marker.validate('list[int]')
+        alias = tc.compile_contract('Values', {'Values': list[int]})
+        alias.validate([1, 2])
+        with self.assertRaises(tc.TypeViolation):
+            alias.validate(['wrong'])
+
     def test_type_narrowing_annotations_check_boolean_results(self):
         namespace = {'TypeGuard': TypeGuard, 'TypeIs': TypeIs}
         for annotation in ('TypeGuard[int]', TypeGuard[int],

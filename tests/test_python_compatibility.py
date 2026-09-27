@@ -1080,6 +1080,13 @@ def deferred(value) -> TypeGuard[Undefined]:
     return bool(value)
 print(is_int(1), is_int('x'), deferred('yes'))
 ''',
+            'type alias annotation': '''from typing import TypeAlias
+Numbers: TypeAlias = list[int]
+Forward: TypeAlias = 'dict[str, int]'
+numbers: Numbers = [1, 2]
+mapping: Forward = {'one': 1}
+print(numbers, mapping)
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
