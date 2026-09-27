@@ -1,6 +1,8 @@
 """Compare ordinary Python execution with Aiython in separate processes."""
 
+import contextlib
 import importlib
+import io
 import json
 import os
 import py_compile
@@ -15,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aiython.cli import ModuleStartFinder, main, module_details, module_source, run_script
+from aiython.config import resolve
 from aiython.models import AiythonError, ProfileConfig, ResolvedConfig
 from aiython.runtime import Runtime
 
@@ -50,6 +53,8 @@ class PythonCompatibilityTests(unittest.TestCase):
 
     def test_module_start_finder_leaves_sourceless_loaders_unchanged(self):
         runtime = Runtime(ResolvedConfig(None, Path.cwd()))
+        with patch('aiython.cli.ProjectFinder.find_spec', return_value=None):
+            self.assertIsNone(ModuleStartFinder(runtime).find_spec('missing'))
         loader = SimpleNamespace(get_source=lambda _: None)
         spec = SimpleNamespace(loader=loader, origin='sourceless.pyc')
         with patch('aiython.cli.ProjectFinder.find_spec', return_value=spec):
@@ -273,6 +278,70 @@ atexit.register(report)
                                        source=source, module_spec=spec, module_invocation='ai_parent_package.task',
                                        initial_main=initial_main, entry_kind='module')
                 self.assertEqual((namespace['prefix'], namespace['answer']), (7, 7))
+            explanation = subprocess.run([sys.executable, '-m', 'aiython', '--explain', '-m',
+                                          'ai_parent_package.task'], cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(explanation.returncode, 0)
+            self.assertIn('SyntaxError', explanation.stderr)
+
+    def test_cli_retries_parent_ai_source_with_one_runtime(self):
+        class Agent:
+            def execute(self, request, runtime):
+                return 7
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'aiython.toml').write_text('version=3\nmodel="openai/test"\n')
+            package = root / 'retry_parent_package'
+            package.mkdir()
+            (package / '__init__.py').write_text('prefix = decide a number\n')
+            (package / 'task.py').write_text('from . import prefix\nprint(prefix)\n')
+            runtime = Runtime(resolve(root / '__main__.py'), agent_factory=lambda _: Agent())
+            output = io.StringIO()
+            with patch('pathlib.Path.cwd', return_value=root), patch.object(sys, 'path', sys.path[:]), \
+                    patch('aiython.cli.Runtime', return_value=runtime), contextlib.redirect_stdout(output):
+                main(['-m', 'retry_parent_package.task'])
+            self.assertEqual(output.getvalue(), '7\n')
+
+    def test_cli_does_not_repeat_package_that_raises_syntax_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / 'raised_syntax_package'
+            package.mkdir()
+            marker = root / 'count.txt'
+            (package / '__init__.py').write_text(
+                'from pathlib import Path\n'
+                f'path = Path({str(marker)!r})\n'
+                'path.write_text(path.read_text() + "x" if path.exists() else "x")\n'
+                'raise SyntaxError("raised by package", (__file__, 1, 1, "x"))\n')
+            (package / 'task.py').write_text('print("unreachable")\n')
+            result = subprocess.run([sys.executable, '-m', 'aiython', '-m', 'raised_syntax_package.task'],
+                                    cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('raised by package', result.stderr)
+            self.assertEqual(marker.read_text(), 'x')
+
+    def test_missing_module_error_precedes_invalid_project_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'aiython.toml').write_text('version=3\nmodel="openai/test"\n'
+                                               'env_file=".aiython/missing.env"\n')
+            result = subprocess.run([sys.executable, '-m', 'aiython', '-m', 'module_that_does_not_exist'],
+                                    cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('No module named', result.stderr)
+            self.assertNotIn('env_file', result.stderr)
+
+    def test_failed_parent_ai_retry_closes_runtime(self):
+        config = ResolvedConfig(None, Path.cwd())
+        runtime = unittest.mock.Mock()
+        first_error = SyntaxError('invalid', ('parent_source.py', 1, 1, 'invalid'))
+        with patch('aiython.cli.module_source', side_effect=[first_error, AiythonError('retry failed')]), \
+                patch('aiython.cli.resolve', return_value=config), \
+                patch('aiython.cli.Runtime', return_value=runtime), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main(['-m', 'failing_parent.task'])
+        runtime.capabilities.close.assert_called_once_with()
 
     def test_safe_path_module_mode_matches_cpython(self):
         with tempfile.TemporaryDirectory() as directory:

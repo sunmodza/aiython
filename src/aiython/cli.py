@@ -330,19 +330,30 @@ def main(argv=None):
             if not args.module_args:
                 argument_parser.error("-m requires a module name")
             module_invocation, *script_args = args.module_args
-            if not args.explain:
+            try:
+                module_spec, source, original_code, initial_main = module_source(module_invocation, script_args)
+            except SyntaxError as exc:
+                # A source file with AI syntax cannot be imported as an ordinary
+                # parent package. A SyntaxError raised *by* package code is a
+                # program error and must not cause that package to run twice.
+                if args.explain or exc.filename is None:
+                    raise
+                traceback = exc.__traceback__
+                while traceback is not None:
+                    if traceback.tb_frame.f_code.co_filename == exc.filename:
+                        raise
+                    traceback = traceback.tb_next
                 module_started = perf_counter()
                 module_config = resolve(Path.cwd() / "__main__.py", config_path=args.config,
                                         profile=args.profile, force_profile=args.force_profile)
                 module_config_seconds = perf_counter() - module_started
                 module_runtime = Runtime(module_config, stats=args.stats, trace_plan=args.trace_plan)
-            try:
-                module_spec, source, original_code, initial_main = module_source(
-                    module_invocation, script_args, runtime=module_runtime)
-            except BaseException:
-                if module_runtime is not None:
+                try:
+                    module_spec, source, original_code, initial_main = module_source(
+                        module_invocation, script_args, runtime=module_runtime)
+                except BaseException:
                     module_runtime.capabilities.close()
-                raise
+                    raise
             path = Path(module_spec.origin or (original_code.co_filename if original_code else module_invocation))
             entry_kind = "module"
             if source is None:
