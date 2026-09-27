@@ -200,8 +200,16 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                entry_kind="file", entry_argument=None, runtime=None, preparation_started=None,
                resolved_seconds=None):
     started = preparation_started if preparation_started is not None else perf_counter()
-    argv0 = ("-c" if entry_kind == "command" else "-" if entry_kind == "stdin" else
-             module_spec.origin if entry_kind == "module" else entry_argument if entry_kind == "path" else str(path))
+    if entry_kind == "command":
+        argv0 = "-c"
+    elif entry_kind == "stdin":
+        argv0 = "-" if entry_argument is None else entry_argument
+    elif entry_kind == "module":
+        argv0 = module_spec.origin
+    elif entry_kind == "path":
+        argv0 = entry_argument
+    else:
+        argv0 = str(path)
     display_path = ("<string>" if entry_kind == "command" else "<stdin>" if entry_kind == "stdin" else
                     path if module_spec else path.absolute())
     path = path.resolve()
@@ -256,6 +264,7 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
         sys.argv = [argv0, *arguments]
         sys.orig_argv = ([*interpreter_args, "-m", module_invocation, *arguments] if entry_kind == "module" else
                          [*interpreter_args, "-c", source, *arguments] if entry_kind == "command" else
+                         [*interpreter_args] if entry_kind == "stdin" and entry_argument == "" else
                          [*interpreter_args, argv0, *arguments])
         if entry_kind == "path":
             entry_path = str(Path(entry_argument).absolute())
@@ -324,9 +333,12 @@ def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     original_path = sys.path[:] if argv is not None else None
     try:
+        implicit_stdin = not arguments and not sys.stdin.isatty()
         if not arguments:
-            parser().print_help()
-            return
+            if not implicit_stdin:
+                parser().print_help()
+                return
+            arguments = ["-"]
         if arguments[:1] == ["setup"]:
             from .setup import setup
             setup(arguments[1:])
@@ -416,6 +428,8 @@ def main(argv=None):
                 source = sys.stdin.read()
                 path = Path.cwd() / "__main__.py"
                 entry_kind = "stdin"
+                if implicit_stdin:
+                    entry_argument = ""
             elif path.suffix == ".pyc" and path.is_file():
                 compiled_code = importlib.machinery.SourcelessFileLoader(
                     "__main__", str(path.absolute())).get_code("__main__")

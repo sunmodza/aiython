@@ -90,7 +90,8 @@ atexit.register(lambda: report('EXIT'))
 '''
         with tempfile.TemporaryDirectory() as directory:
             for name, arguments, input_source in (('command', ['-c', source, 'one', '-x'], None),
-                                                  ('stdin', ['-', 'one', '-x'], source)):
+                                                  ('stdin', ['-', 'one', '-x'], source),
+                                                  ('implicit stdin', [], source)):
                 with self.subTest(name=name):
                     python = subprocess.run([sys.executable, *arguments], input=input_source,
                                             cwd=directory, capture_output=True, text=True)
@@ -339,6 +340,7 @@ atexit.register(report)
             for flag in ('-I', '-P'):
                 for name, arguments, input_source in (('command', ['-c', source], None),
                                                       ('stdin', ['-'], source),
+                                                      ('implicit stdin', [], source),
                                                       ('directory', ['app'], None),
                                                       ('zipapp', ['app.pyz'], None)):
                     with self.subTest(flag=flag, name=name):

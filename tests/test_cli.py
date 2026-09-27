@@ -15,15 +15,21 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 from aiython.config import CAPABILITIES, credential, resolve
+from aiython.cli import main
 from aiython.models import ConfigError
 from aiython.setup import ModelChoice, _catalog, _choose_model, setup
 
 
 class CLITests(unittest.TestCase):
-    def test_cli_without_arguments_shows_first_run_help(self):
-        result = subprocess.run([sys.executable, "-m", "aiython"], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("aiython setup", result.stdout)
+    def test_cli_without_arguments_shows_first_run_help_on_terminal(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        output = io.StringIO()
+        with patch.object(sys, 'stdin', Terminal()), contextlib.redirect_stdout(output):
+            main([])
+        self.assertIn("aiython setup", output.getvalue())
 
     def test_cli_version_uses_distribution_metadata(self):
         result = subprocess.run([sys.executable, "-m", "aiython", "--version"], capture_output=True, text=True)
