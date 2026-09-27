@@ -135,9 +135,19 @@ class TypeRuntime:
         type.__setattr__(cls, '__init__', checked_init)
 
     @staticmethod
-    def _dataclass_field_placeholder(frame, value):
-        return (type(value) is dataclasses.Field and frame.f_code.co_name != '<module>'
-                and not frame.f_code.co_flags & inspect.CO_OPTIMIZED)
+    def _class_field_placeholder(frame, value):
+        if frame.f_code.co_name == '<module>' or frame.f_code.co_flags & inspect.CO_OPTIMIZED:
+            return False
+        kind = type(value)
+        if kind is dataclasses.Field:
+            return True
+        for module_name, class_name in (('pydantic.fields', 'FieldInfo'),
+                                        ('pydantic.fields', 'ModelPrivateAttr'),
+                                        ('attr._make', '_CountingAttr')):
+            module = sys.modules.get(module_name)
+            if module is not None and kind is vars(module).get(class_name):
+                return True
+        return False
 
     def _track_method(self, cls, member):
         if type(member) is types.FunctionType:
@@ -273,7 +283,7 @@ class TypeRuntime:
         if contract:
             if name in scope.final_names:
                 raise TypeViolation(f'{name}: Final binding cannot be reassigned')
-            if not self._dataclass_field_placeholder(frame, value):
+            if not self._class_field_placeholder(frame, value):
                 contract.validate(value,name,bindings=scope.bindings)
             if contract.marker == 'Final': scope.final_names.add(name)
         with self._classes_lock:
@@ -332,7 +342,7 @@ class TypeRuntime:
                 if name in values and name not in scope.contracts:
                     scope.contracts[name] = self.contract(source,self.namespace(frame))
             for name, contract in scope.contracts.items():
-                if name in values and not self._dataclass_field_placeholder(frame, values[name]):
+                if name in values and not self._class_field_placeholder(frame, values[name]):
                     contract.validate(values[name],name,bindings=scope.bindings)
 
     def checkpoint(self):

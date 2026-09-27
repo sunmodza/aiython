@@ -334,6 +334,12 @@ class Contract:
             for name, contract in self.fields.items():
                 try: item = object.__getattribute__(value,name)
                 except AttributeError:
+                    if name.startswith('_'):
+                        try: private = object.__getattribute__(value, '__pydantic_private__')
+                        except AttributeError: private = None
+                        if type(private) is dict and name in private:
+                            child(contract, private[name], '.' + name)
+                            continue
                     if dataclasses.is_dataclass(self.python_type): fail(f'missing attribute {name}')
                     continue
                 child(contract,item,'.'+name)

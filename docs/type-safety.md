@@ -23,7 +23,7 @@ analysis: TicketAnalysis = analyze the current ticket
 - Function arguments, positional-only/keyword-only arguments, `*args`, `**kwargs`, explicit returns and implicit `None` returns are checked. Async functions use the same rules.
 - `**kwargs: Unpack[TypedDict]` checks required and optional keyword fields using the declared `TypedDict` contract.
 - The return value is checked again after `finally`, so cleanup cannot silently invalidate a return that was already checked.
-- Typed class fields are checked on direct attribute assignment. Dataclass values are checked without conversion to dictionaries or reconstruction. Nested registered project instances are checked at execution boundaries.
+- Typed class fields are checked on direct attribute assignment. Dataclass values are checked without conversion to dictionaries or reconstruction. `dataclasses.field`, Pydantic `Field`/`PrivateAttr`, and `attrs.field` descriptors are accepted while the class is built; the resulting instance values remain checked. Nested registered project instances are checked at execution boundaries.
 - Mutable containers are checked deeply. Mutations through aliases are detected at statement boundaries. Enclosing scopes and globals are included; closures preserve referenced local annotation names.
 - Generator functions check each yielded value, sent value and final return. Async generators and `yield from` retain their control-flow protocols.
 - AI `evaluate`, `execute`, binding writes, terminal results and recovery replacement values use the same checker. Invalid AI output can be repaired within the bounded agent loop before assignment; completed capability side effects are retained.

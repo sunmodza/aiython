@@ -363,6 +363,28 @@ class Item:
         with self.assertRaises(TypeViolation):
             self.run_source(prelude + "item = Item(2)\nitem.values.append('bad')\n")
 
+    def test_third_party_field_descriptors_keep_instance_checks(self):
+        for prelude in ('''from pydantic import BaseModel, Field
+class Item(BaseModel):
+    count: int = Field(default=1)
+''', '''from attrs import define, field
+@define
+class Item:
+    count: int = field(default=1)
+'''):
+            with self.subTest(prelude=prelude):
+                self.assertEqual(self.run_source(prelude + 'answer = Item().count\n')['answer'], 1)
+                with self.assertRaises(TypeViolation):
+                    self.run_source(prelude + "item = Item()\nitem.count = 'bad'\n")
+
+        private = '''from pydantic import BaseModel, PrivateAttr
+class Item(BaseModel):
+    _cache: list[int] = PrivateAttr(default_factory=list)
+'''
+        self.assertEqual(self.run_source(private + 'item = Item()\nanswer = item._cache\n')['answer'], [])
+        with self.assertRaises(TypeViolation):
+            self.run_source(private + "item = Item()\nitem._cache.append('bad')\n")
+
     def test_typed_natural_language_keeps_subscript_inside_statement(self):
         from aiython.frontend import parse
         unit = parse('analysis: TicketAnalysis = analyze the ticket from ticket["message"]\n','test.py')

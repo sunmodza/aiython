@@ -995,6 +995,27 @@ point = Point()
 point.values.append(1)
 print(point.values)
 ''',
+            'pydantic field descriptors': '''from pydantic import BaseModel, Field
+class Point(BaseModel):
+    x: int = Field(default=1, ge=0)
+    values: list[int] = Field(default_factory=list)
+point = Point()
+point.values.append(2)
+print(point.x, point.values)
+''',
+            'pydantic private field': '''from pydantic import BaseModel, PrivateAttr
+class Point(BaseModel):
+    _cache: list[int] = PrivateAttr(default_factory=list)
+point = Point()
+point._cache.append(2)
+print(point._cache)
+''',
+            'attrs field descriptors': '''from attrs import define, field
+@define
+class Point:
+    x: int = field(default=1)
+print(Point().x)
+''',
             'enum': '''from enum import Enum
 class Color(Enum):
     RED = 1
