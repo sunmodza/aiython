@@ -15,6 +15,143 @@ from aiython.cli import main, module_source, run_script
 
 
 class PythonCompatibilityTests(unittest.TestCase):
+    def test_command_and_stdin_execution_match_cpython(self):
+        source = '''import atexit, inspect, sys
+def report(stage):
+    main = sys.modules['__main__']
+    print(stage, sys.argv, sys.orig_argv, sys.path[:2])
+    print(__name__, __package__, __spec__, getattr(__loader__, '__name__', type(__loader__).__name__))
+    print(vars(main).get('__file__', 'ABSENT'), vars(main).get('__cached__', 'ABSENT'))
+    print(inspect.currentframe().f_code.co_filename)
+report('RUN')
+atexit.register(lambda: report('EXIT'))
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            for name, arguments, input_source in (('command', ['-c', source, 'one', '-x'], None),
+                                                  ('stdin', ['-', 'one', '-x'], source)):
+                with self.subTest(name=name):
+                    python = subprocess.run([sys.executable, *arguments], input=input_source,
+                                            cwd=directory, capture_output=True, text=True)
+                    aiython = subprocess.run([sys.executable, '-m', 'aiython', *arguments], input=input_source,
+                                             cwd=directory, capture_output=True, text=True)
+                    self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                                     (python.returncode, python.stdout, python.stderr))
+
+    def test_directory_and_zipapp_execution_match_cpython(self):
+        source = '''import atexit, inspect, sys
+from helper import value
+def report(stage):
+    main = sys.modules['__main__']
+    print(stage, value, sys.argv, sys.orig_argv, sys.path[:2])
+    print(__name__, __package__, __spec__.name, __spec__.origin)
+    print(vars(main).get('__file__', 'ABSENT'), vars(main).get('__cached__', 'ABSENT'))
+    print(type(__loader__).__name__, inspect.currentframe().f_code.co_filename)
+report('RUN')
+atexit.register(lambda: report('EXIT'))
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / 'app'
+            app.mkdir()
+            (app / '__main__.py').write_text(source)
+            (app / 'helper.py').write_text('value = 7\n')
+            archive = root / 'app.pyz'
+            with zipfile.ZipFile(archive, 'w') as package:
+                package.writestr('__main__.py', source)
+                package.writestr('helper.py', 'value = 7\n')
+            for name in ('app', 'app.pyz'):
+                with self.subTest(name=name):
+                    python = subprocess.run([sys.executable, name, 'one', '-x'], cwd=root,
+                                            capture_output=True, text=True)
+                    aiython = subprocess.run([sys.executable, '-m', 'aiython', name, 'one', '-x'], cwd=root,
+                                             capture_output=True, text=True)
+                    self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                                     (python.returncode, python.stdout, python.stderr))
+
+    def test_sourceless_directory_execution_matches_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / 'app'
+            app.mkdir()
+            source = app / '__main__.py'
+            source.write_text('import sys\nprint(__file__, __cached__, sys.argv, sys.path[0])\n')
+            py_compile.compile(str(source), cfile=str(app / '__main__.pyc'), doraise=True)
+            source.unlink()
+            python = subprocess.run([sys.executable, 'app'], cwd=root, capture_output=True, text=True)
+            aiython = subprocess.run([sys.executable, '-m', 'aiython', 'app'], cwd=root,
+                                     capture_output=True, text=True)
+            self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                             (python.returncode, python.stdout, python.stderr))
+            explanation = subprocess.run([sys.executable, '-m', 'aiython', '--explain', 'app'],
+                                         cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(explanation.returncode, 0)
+            self.assertIn('Cannot explain an entry without Python source', explanation.stderr)
+
+    def test_direct_bytecode_execution_matches_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source.py'
+            source.write_text('''import atexit, inspect, sys
+def report():
+    main = sys.modules['__main__']
+    print(sys.argv, sys.orig_argv, sys.path[:2])
+    print(vars(main).get('__file__', 'ABSENT'), vars(main).get('__cached__', 'ABSENT'))
+    print(type(__loader__).__name__, __package__, __spec__, inspect.currentframe().f_code.co_filename)
+report()
+atexit.register(report)
+''')
+            bytecode = root / 'direct.pyc'
+            py_compile.compile(str(source), cfile=str(bytecode), doraise=True)
+            source.unlink()
+            python = subprocess.run([sys.executable, 'direct.pyc', 'arg'], cwd=root,
+                                    capture_output=True, text=True)
+            aiython = subprocess.run([sys.executable, '-m', 'aiython', 'direct.pyc', 'arg'], cwd=root,
+                                     capture_output=True, text=True)
+            self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                             (python.returncode, python.stdout, python.stderr))
+
+    def test_new_entry_modes_report_invalid_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            empty = root / 'empty'
+            empty.mkdir()
+            for arguments, expected in ((['-c'], '-c requires a command string'),
+                                        (['empty'], 'Cannot find __main__')):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run([sys.executable, '-m', 'aiython', *arguments], cwd=root,
+                                            capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected, result.stderr)
+            for arguments, input_source in ((['--explain', '-c', 'value = 1'], None),
+                                            (['--explain', '-'], 'value = 1\n')):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run([sys.executable, '-m', 'aiython', *arguments], cwd=root,
+                                            input=input_source, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(result.stdout)['blocks'], [])
+
+    def test_safe_path_modes_for_new_entries_match_cpython(self):
+        source = 'import sys\nprint(sys.flags.safe_path, sys.path[:2])\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / 'app'
+            app.mkdir()
+            (app / '__main__.py').write_text(source)
+            with zipfile.ZipFile(root / 'app.pyz', 'w') as package:
+                package.writestr('__main__.py', source)
+            for flag in ('-I', '-P'):
+                for name, arguments, input_source in (('command', ['-c', source], None),
+                                                      ('stdin', ['-'], source),
+                                                      ('directory', ['app'], None),
+                                                      ('zipapp', ['app.pyz'], None)):
+                    with self.subTest(flag=flag, name=name):
+                        python = subprocess.run([sys.executable, flag, *arguments], input=input_source,
+                                                cwd=root, capture_output=True, text=True)
+                        aiython = subprocess.run([sys.executable, flag, '-m', 'aiython', *arguments],
+                                                 input=input_source, cwd=root, capture_output=True, text=True)
+                        self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                                         (python.returncode, python.stdout, python.stderr))
+
     def test_module_startup_without_existing_main_restores_modules(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -150,7 +287,7 @@ atexit.register(lambda: print('EXIT', sys.modules['__main__'].__file__,
             result = subprocess.run([sys.executable, '-m', 'aiython', '--explain', '-m', 'sourceless'],
                                     cwd=root, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('Cannot explain a module without Python source', result.stderr)
+            self.assertIn('Cannot explain an entry without Python source', result.stderr)
 
     def test_module_config_comes_from_invoking_project(self):
         with tempfile.TemporaryDirectory() as directory:

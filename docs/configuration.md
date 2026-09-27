@@ -66,6 +66,8 @@ Run `aiython config show --script PATH` to inspect resolved settings. `--config`
 
 Run an importable module or package with `aiython -m package.module` or `aiython -m package`. Put Aiython options before `-m`; arguments after the module name go to that module. Packages need a `__main__.py`, as with `python -m`. Source files get Aiython's source transformation; modules available only as bytecode run as Python bytecode. Resolving a dotted name for `--explain -m` imports its parent package.
 
+The CLI also accepts `aiython -c 'print(1)'`, `aiython -` for source from stdin, and a directory or zipapp containing `__main__.py`. Arguments after the command, `-`, or path go to the program. For `-c` and stdin, Aiython searches for `aiython.toml` from the current directory. A direct `.pyc` file and source-less `__main__.pyc` run as Python bytecode without source transformation or `--explain` output.
+
 Version 1 and 2 configs are rejected with migration guidance and never overwritten. Move the old reasoning model to top-level `model`, put other routes under `[capabilities]`, and replace direct keys with `api_key_env` plus a private env file. Runtime state starts fresh in `.aiython/runtime-v3.sqlite`; older databases remain untouched.
 
 ## Deadlines and jobs

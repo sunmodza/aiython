@@ -12,6 +12,7 @@ import runpy
 import sys
 import tokenize
 import types
+import zipfile
 from pathlib import Path
 from time import perf_counter
 
@@ -97,28 +98,45 @@ def module_source(name, arguments=()):
     return spec, source, code, initial_main
 
 
+def path_source(path):
+    spec = importlib.machinery.PathFinder.find_spec("__main__", [str(path.absolute())])
+    if spec is None or spec.loader is None:
+        raise AiythonError(f"Cannot find __main__ in: {path}")
+    source = getattr(spec.loader, "get_source", lambda _: None)("__main__")
+    return spec, source, spec.loader.get_code("__main__")
+
+
 def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, stats=False, trace_plan=False,
                config_path=None, profile=None, force_profile=None, restore_state=True,
-               source=None, module_spec=None, module_invocation=None, compiled_code=None, initial_main=None):
+               source=None, module_spec=None, module_invocation=None, compiled_code=None, initial_main=None,
+               entry_kind="file", entry_argument=None):
     started = perf_counter()
-    argv0 = str(path) if module_spec is None else module_spec.origin
-    display_path = path.absolute() if module_spec is None else path
+    argv0 = ("-c" if entry_kind == "command" else "-" if entry_kind == "stdin" else
+             module_spec.origin if entry_kind == "module" else entry_argument if entry_kind == "path" else str(path))
+    display_path = ("<string>" if entry_kind == "command" else "<stdin>" if entry_kind == "stdin" else
+                    path if module_spec else path.absolute())
     path = path.resolve()
-    config_source = Path.cwd() / "__main__.py" if module_spec else path
+    config_source = (Path.cwd() / "__main__.py" if entry_kind in ("module", "command", "stdin") else
+                     Path(entry_argument).absolute() / "__main__.py" if entry_kind == "path" and
+                     Path(entry_argument).is_dir() else path)
     config = config or resolve(config_source, config_path=config_path, profile=profile, force_profile=force_profile)
     config_seconds = perf_counter() - started
     runtime = Runtime(config, agent_factory=agent_factory, stats=stats, trace_plan=trace_plan)
     code = (compiled_code if compiled_code is not None else
             runtime.compile_source(read_source(path) if source is None else source, str(display_path), entry=True))
     module = initial_main or types.ModuleType("__main__")
-    module.__dict__.update({"__file__": str(display_path) if module_spec is None else module_spec.origin,
-                            "__package__": module_spec.parent if module_spec else None,
+    module.__dict__.update({"__package__": module_spec.parent if module_spec else None,
                             "__spec__": module_spec,
-                            "__cached__": module_spec.cached if module_spec else None,
                             "__loader__": module_spec.loader if module_spec else
+                                          importlib.machinery.BuiltinImporter if entry_kind in ("command", "stdin") else
+                                          importlib.machinery.SourcelessFileLoader("__main__", str(display_path))
+                                          if entry_kind == "bytecode" else
                                           importlib.machinery.SourceFileLoader("__main__", str(display_path)),
                             RUNTIME_NAME: runtime,
                             "__builtins__": builtins})
+    if entry_kind != "command":
+        module.__dict__.update({"__file__": module_spec.origin if module_spec else str(display_path),
+                                "__cached__": module_spec.cached if module_spec else None})
     if sys.version_info < (3, 14):
         module.__dict__.setdefault("__annotations__", {})
     old_main = sys.modules.get("__main__")
@@ -142,12 +160,23 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     try:
         sys.modules["__main__"] = module
         sys.argv = [argv0, *arguments]
-        sys.orig_argv = ([*interpreter_args, "-m", module_invocation, *arguments] if module_spec else
+        sys.orig_argv = ([*interpreter_args, "-m", module_invocation, *arguments] if entry_kind == "module" else
+                         [*interpreter_args, "-c", source, *arguments] if entry_kind == "command" else
                          [*interpreter_args, argv0, *arguments])
-        if module_spec is None and not sys.flags.safe_path:
-            sys.path.insert(0, str(path.parent))
+        if entry_kind == "path":
+            entry_path = str(Path(entry_argument).absolute())
+            if sys.flags.safe_path:
+                sys.path.insert(0, entry_path)
+            else:
+                sys.path[:1] = [entry_path]
+        elif not sys.flags.safe_path:
+            if entry_kind in ("file", "bytecode"):
+                sys.path[:1] = [str(path.parent)]
+            elif entry_kind in ("command", "stdin"):
+                sys.path[:1] = [""]
         sys.meta_path.insert(0, finder)
-        os.environ["AIYTHON_SPAWN_ENTRY"] = str(display_path)
+        if entry_kind in ("file", "module"):
+            os.environ["AIYTHON_SPAWN_ENTRY"] = str(display_path)
         execution_started = perf_counter()
         exec(code, module.__dict__)
         return module.__dict__
@@ -169,7 +198,7 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
         else:
             # CPython removes these entry-script attributes before waiting for
             # non-daemon threads and running atexit callbacks.
-            if module_spec is None:
+            if entry_kind in ("file", "bytecode", "stdin"):
                 module.__dict__.pop("__file__", None)
                 module.__dict__.pop("__cached__", None)
 
@@ -190,6 +219,8 @@ def parser():
     result.add_argument("--stats", action="store_true", help="Report model calls, tools, request bytes and timings on stderr")
     result.add_argument("-m", "--module", dest="module_args", nargs=argparse.REMAINDER,
                         help="Run a Python module as __main__")
+    result.add_argument("-c", dest="command_args", nargs=argparse.REMAINDER,
+                        help="Run Python source from a command string")
     result.add_argument("script", nargs="?")
     result.add_argument("args", nargs=argparse.REMAINDER)
     return result
@@ -237,27 +268,51 @@ def main(argv=None):
             return
         argument_parser = parser()
         args = argument_parser.parse_args(arguments)
-        module_spec = source = module_invocation = compiled_code = initial_main = None
+        module_spec = source = module_invocation = compiled_code = initial_main = entry_argument = None
+        entry_kind = "file"
         if args.module_args is not None:
             if not args.module_args:
                 argument_parser.error("-m requires a module name")
             module_invocation, *script_args = args.module_args
             module_spec, source, original_code, initial_main = module_source(module_invocation, script_args)
             path = Path(module_spec.origin or original_code.co_filename)
+            entry_kind = "module"
             if source is None:
                 compiled_code = original_code
+        elif args.command_args is not None:
+            if not args.command_args:
+                argument_parser.error("-c requires a command string")
+            source, *script_args = args.command_args
+            path = Path.cwd() / "__main__.py"
+            entry_kind = "command"
         else:
             if args.script is None:
                 argument_parser.error("a script path or -m module is required")
             path = Path(args.script)
             script_args = args.args
+            if args.script == "-":
+                source = sys.stdin.read()
+                path = Path.cwd() / "__main__.py"
+                entry_kind = "stdin"
+            elif path.suffix == ".pyc" and path.is_file():
+                compiled_code = importlib.machinery.SourcelessFileLoader(
+                    "__main__", str(path.absolute())).get_code("__main__")
+                entry_kind = "bytecode"
+            elif path.is_dir() or zipfile.is_zipfile(path):
+                entry_argument = args.script
+                module_spec, source, original_code = path_source(path)
+                path = Path(module_spec.origin or original_code.co_filename)
+                entry_kind = "path"
+                if source is None:
+                    compiled_code = original_code
         if args.explain:
             if source is None and compiled_code is not None:
-                raise AiythonError("Cannot explain a module without Python source")
-            config_source = Path.cwd() / "__main__.py" if module_spec else path
+                raise AiythonError("Cannot explain an entry without Python source")
+            config_source = Path.cwd() / "__main__.py" if entry_kind in ("module", "command", "stdin") else path
             config = resolve(config_source, config_path=args.config, profile=args.profile,
                              force_profile=args.force_profile)
-            filename = str(path if module_spec else path.resolve())
+            filename = ("<string>" if entry_kind == "command" else "<stdin>" if entry_kind == "stdin" else
+                        str(path if module_spec else path.resolve()))
             unit = parse(read_source(path.resolve()) if source is None else source, filename)
             runtime = Runtime(config)
             runtime.prepare(unit, entry=True)
@@ -272,7 +327,8 @@ def main(argv=None):
                    force_profile=args.force_profile, stats=args.stats, trace_plan=args.trace_plan,
                    restore_state=argv is not None, source=source,
                    module_spec=module_spec, module_invocation=module_invocation,
-                   compiled_code=compiled_code, initial_main=initial_main)
+                   compiled_code=compiled_code, initial_main=initial_main,
+                   entry_kind=entry_kind, entry_argument=entry_argument)
     except AiythonError as exc:
         # Keep the original runtime cause visible without leaking provider internals.
         if exc.__cause__:
