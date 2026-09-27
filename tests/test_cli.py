@@ -59,6 +59,30 @@ class CLITests(unittest.TestCase):
         if not sys.flags.safe_path:
             self.assertEqual(path, '')
 
+    def test_repl_options_and_piped_stdin_without_script(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with patch.object(sys, 'stdin', Terminal()), patch('aiython.cli.run_repl') as start:
+            main(['--config', 'settings.toml', '--profile', 'chosen', '--stats'])
+        start.assert_called_once_with(config_path='settings.toml', profile='chosen',
+                                      force_profile=None, stats=True, trace_plan=False,
+                                      restore_state=True)
+
+        errors = io.StringIO()
+        with patch.object(sys, 'stdin', Terminal('print("ready")\n')), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+            run_repl(stats=True, restore_state=True)
+        self.assertIn('aiython run stats:', errors.getvalue())
+
+        result = subprocess.run([sys.executable, '-m', 'aiython', '--stats'],
+                                input='import sys\nprint(sys.argv)\n',
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "['']\n")
+        self.assertIn('aiython run stats:', result.stderr)
+
     def test_cli_version_uses_distribution_metadata(self):
         result = subprocess.run([sys.executable, "-m", "aiython", "--version"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

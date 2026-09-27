@@ -615,8 +615,7 @@ atexit.register(lambda: print('EXIT', sys.modules['__main__'].__file__,
     def test_module_cli_reports_invalid_requests(self):
         for arguments, expected in ((['-m'], '-m requires a module name'),
                                     (['-m', 'module_that_does_not_exist'], 'No module named'),
-                                    (['--explain', '-m', 'module_that_does_not_exist'], 'No module named'),
-                                    (['--stats'], 'a script path or -m module is required')):
+                                    (['--explain', '-m', 'module_that_does_not_exist'], 'No module named')):
             with self.subTest(arguments=arguments):
                 result = subprocess.run([sys.executable, '-m', 'aiython', *arguments],
                                         capture_output=True, text=True)

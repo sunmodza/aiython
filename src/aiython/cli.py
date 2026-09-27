@@ -306,12 +306,16 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                 module.__dict__.pop("__cached__", None)
 
 
-def run_repl(*, restore_state=False):
+def run_repl(*, config_path=None, profile=None, force_profile=None,
+             stats=False, trace_plan=False, restore_state=False):
     from .repl import AiythonConsole
     from .typed_runtime import Scope
 
-    config = resolve(Path.cwd() / '__main__.py')
-    runtime = Runtime(config)
+    started = perf_counter()
+    config = resolve(Path.cwd() / '__main__.py', config_path=config_path,
+                     profile=profile, force_profile=force_profile)
+    config_seconds = perf_counter() - started
+    runtime = Runtime(config, stats=stats, trace_plan=trace_plan)
     module = types.ModuleType('__main__')
     module.__dict__.update({'__package__': None, '__spec__': None,
                             '__loader__': importlib.machinery.BuiltinImporter,
@@ -322,8 +326,18 @@ def run_repl(*, restore_state=False):
     finder = ProjectFinder(runtime)
     old_main = sys.modules.get('__main__')
     old_argv, old_orig_argv, old_path = sys.argv, sys.orig_argv, sys.path[:]
+    execution_started = None
+    def finish():
+        if stats:
+            runtime.stats.run = {'total_seconds': perf_counter() - started,
+                                 'config_seconds': config_seconds,
+                                 'execution_seconds': (perf_counter() - execution_started
+                                                       if execution_started is not None else 0)}
+        runtime.stats.report()
+        runtime.capabilities.close()
+
     if not restore_state:
-        atexit.register(runtime.capabilities.close)
+        atexit.register(finish)
     try:
         sys.modules['__main__'] = module
         sys.argv = ['']
@@ -334,6 +348,7 @@ def run_repl(*, restore_state=False):
         banner = ('' if sys.flags.quiet else
                   f'Python {sys.version} on {sys.platform}\n'
                   'Type "help", "copyright", "credits" or "license" for more information.')
+        execution_started = perf_counter()
         console.interact(banner=banner, exitmsg='')
         return module.__dict__
     finally:
@@ -344,7 +359,7 @@ def run_repl(*, restore_state=False):
                 sys.modules.pop('__main__', None)
             else:
                 sys.modules['__main__'] = old_main
-            runtime.capabilities.close()
+            finish()
 
 
 def parser():
@@ -462,7 +477,15 @@ def main(argv=None):
             entry_kind = "command"
         else:
             if args.script is None:
-                argument_parser.error("a script path or -m module is required")
+                if sys.stdin.isatty():
+                    if args.explain:
+                        argument_parser.error("--explain requires a script, -c, -m, or piped source")
+                    run_repl(config_path=args.config, profile=args.profile,
+                             force_profile=args.force_profile, stats=args.stats,
+                             trace_plan=args.trace_plan, restore_state=argv is not None)
+                    return
+                args.script = "-"
+                implicit_stdin = True
             path = Path(args.script)
             script_args = args.args
             if args.script == "-":
