@@ -6,14 +6,27 @@ from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
-from typing import Any, Annotated, Callable, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeVar, TypeVarTuple, TypedDict, Unpack
+from typing import Any, Annotated, Callable, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeGuard, TypeVar, TypeVarTuple, TypedDict, Unpack
 import unittest
 from unittest.mock import patch
+from typing_extensions import TypeIs
 
 from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_type_narrowing_annotations_check_boolean_results(self):
+        namespace = {'TypeGuard': TypeGuard, 'TypeIs': TypeIs}
+        for annotation in ('TypeGuard[int]', TypeGuard[int],
+                           'TypeIs[int]', TypeIs[int], 'TypeGuard[Undefined]'):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                self.assertEqual(contract.schema()['type'], 'boolean')
+                contract.validate(True)
+                contract.validate(False)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(1)
+
     def test_inherited_generic_fields_use_base_type_arguments(self):
         variable = TypeVar('T')
         item = TypeVar('Item')

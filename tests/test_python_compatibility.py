@@ -1072,6 +1072,14 @@ def invoke(fn: AbstractCallable):
     return fn()
 print(apply(str, 3), invoke(lambda: 'ok'))
 ''',
+            'type narrowing return': '''from __future__ import annotations
+from typing import TypeGuard
+def is_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int)
+def deferred(value) -> TypeGuard[Undefined]:
+    return bool(value)
+print(is_int(1), is_int('x'), deferred('yes'))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
@@ -1103,6 +1111,11 @@ leaf: Leaf = Leaf([1, 2])
 print(leaf.value)
 '''
         if sys.version_info >= (3, 13):
+            cases['type is return'] = '''from typing import TypeIs
+def is_int(value: object) -> TypeIs[int]:
+    return isinstance(value, int)
+print(is_int(1), is_int('x'))
+'''
             cases['defaulted type aliases'] = '''type Pair[T, U = str] = tuple[T, U]
 type Variadic[T, *Ts, U = str] = tuple[T, *Ts, U]
 first: Pair[int] = (1, 'x')

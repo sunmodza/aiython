@@ -16,7 +16,7 @@ import inspect
 import sys
 import types
 import typing
-from typing_extensions import ReadOnly, TypeAliasType
+from typing_extensions import ReadOnly, TypeAliasType, TypeGuard, TypeIs
 
 try:
     import annotationlib
@@ -29,6 +29,8 @@ VALIDATORS = {}
 PRIMITIVE_KINDS = frozenset(('str', 'int', 'float', 'bool', 'bytes', 'complex'))
 TYPE_ALIAS_TYPES = tuple({TypeAliasType, getattr(typing, "TypeAliasType", TypeAliasType)})
 READ_ONLY_TYPES = tuple({ReadOnly, getattr(typing, "ReadOnly", ReadOnly)})
+TYPE_NARROWING_TYPES = tuple({TypeGuard, TypeIs, typing.TypeGuard,
+                              getattr(typing, 'TypeIs', TypeIs)})
 
 
 class TypeViolation(CapabilityError, TypeError):
@@ -278,6 +280,10 @@ class Compiler:
                 metadata = [ast.literal_eval(n) for n in nodes[1:]]
                 return Contract('annotated',ast.unparse(node),(self.node(nodes[0],names),),
                                 description='; '.join(v for v in metadata if isinstance(v,str)))
+            if base in TYPE_NARROWING_TYPES:
+                if len(nodes) != 1:
+                    raise UnsupportedType('Type narrowing requires one target type')
+                return Contract('bool',ast.unparse(node),python_type=bool)
             args = tuple(Ellipsis if isinstance(n,ast.Constant) and n.value is Ellipsis else self.node(n,names) for n in nodes)
             return self.generic(base,args,ast.unparse(node),names)
         return self.value(self.lookup(node,names),names)
@@ -509,6 +515,8 @@ class Compiler:
         if origin is typing.Literal: return Contract('literal',str(target),args)
         if origin is typing.Annotated:
             return Contract('annotated',str(target),(self.compile(args[0],names),),description='; '.join(v for v in args[1:] if isinstance(v,str)))
+        if origin in TYPE_NARROWING_TYPES:
+            return Contract('bool',str(target),python_type=bool)
         if origin is not None:
             return self.generic(origin,tuple(Ellipsis if a is Ellipsis else self.compile(a,names) for a in args),str(target),names)
         if target in (int,str,float,bool,bytes,complex): return Contract(target.__name__,target.__name__,python_type=target)
