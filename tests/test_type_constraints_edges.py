@@ -69,6 +69,8 @@ class ContractEdgeTests(unittest.TestCase):
             ('typing.AbstractSet[str]', frozenset({'x'}), frozenset({1})),
             ('typing.MutableSet[int]', {1}, frozenset({1})),
             ('typing.Collection[int]', {1: 'value'}, ['wrong']),
+            ('typing.Container[int]', {1: 'value'}, {'wrong': 1}),
+            ('typing.Reversible[str]', OrderedDict(x=1), OrderedDict({1: 'x'})),
             ('typing.Sequence[int]', memoryview(b'abc'), ['wrong']),
         )
         for annotation, valid, invalid in cases:
@@ -78,9 +80,14 @@ class ContractEdgeTests(unittest.TestCase):
                 with self.assertRaises(tc.TypeViolation):
                     contract.validate(invalid)
         tc.compile_contract('typing.MutableSequence[int]', namespace).validate(bytearray(b'a'))
+        tc.compile_contract('typing.Reversible[int]', namespace).validate(deque([1, 2]))
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('typing.Reversible[int]', namespace).validate({1, 2})
         for annotation, value in (('typing.List', [1, 'x']),
                                   ('typing.Dict', {'x': 1}),
                                   ('typing.Collection', {1: 2}),
+                                  ('typing.Container', {1: 2}),
+                                  ('typing.Reversible', range(2)),
                                   ('typing.Sequence', memoryview(b'a')),
                                   ('typing.Tuple', (1, 'x'))):
             with self.subTest(annotation=annotation):

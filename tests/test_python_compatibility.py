@@ -1149,6 +1149,13 @@ items: ItemsView[str, int] = mapping.items()
 view: MappingView[tuple[str, int]] = items
 print(list(keys), list(values), list(items), list(view))
 ''',
+            'container and reversible annotations': '''from collections import OrderedDict, deque
+from typing import Container, Reversible
+keys: Container[str] = {'x': 1, 'y': 2}
+ordered: Reversible[str] = OrderedDict(x=1, y=2)
+numbers: Reversible[int] = deque([1, 2, 3])
+print('x' in keys, list(reversed(ordered)), list(reversed(numbers)))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

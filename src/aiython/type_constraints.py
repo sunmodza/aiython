@@ -43,6 +43,8 @@ SAFE_MAPPING_TYPES = (dict, defaultdict, OrderedDict, Counter)
 SAFE_COLLECTION_TYPES = (list, tuple, set, frozenset, dict, str, bytes,
                          bytearray, memoryview, range,
                          deque, defaultdict, OrderedDict, Counter)
+SAFE_REVERSIBLE_TYPES = (list, tuple, dict, str, bytes, bytearray,
+                         memoryview, range, deque, defaultdict, OrderedDict, Counter)
 SAFE_VIEW_TYPES = {
     'keys_view': (type({}.keys()), type(OrderedDict().keys())),
     'values_view': (type({}.values()), type(OrderedDict().values())),
@@ -54,6 +56,7 @@ CONTAINER_KINDS = {list:'list', set:'set', frozenset:'frozenset', dict:'dict',
                    Counter:'counter', ChainMap:'chainmap', abc.Sequence:'sequence', abc.Mapping:'mapping',
                    abc.MutableMapping:'mutable_mapping', abc.MutableSequence:'mutable_sequence',
                    abc.Set:'abstract_set', abc.MutableSet:'mutable_set', abc.Collection:'collection',
+                   abc.Container:'container', abc.Reversible:'reversible',
                    abc.MappingView:'mapping_view', abc.KeysView:'keys_view',
                    abc.ValuesView:'values_view', abc.ItemsView:'items_view'}
 
@@ -118,9 +121,9 @@ class Contract:
         elif kind in ('str', 'int', 'float', 'bool'):
             result = {'type': {'str':'string', 'int':'integer', 'float':'number', 'bool':'boolean'}[kind]}
         elif kind in ('list', 'set', 'frozenset', 'sequence', 'deque',
-                      'mutable_sequence', 'abstract_set', 'mutable_set'):
+                      'mutable_sequence', 'abstract_set', 'mutable_set', 'reversible'):
             result = {'type': 'array', 'items': self.args[0].schema(seen)}
-        elif kind == 'collection':
+        elif kind in ('collection', 'container'):
             result = {'x-python-collection-items': self.args[0].schema(seen)}
         elif kind in SAFE_VIEW_TYPES:
             item = (self.args[0].schema(seen) if kind != 'items_view' else
@@ -210,15 +213,18 @@ class Contract:
         elif kind in ('str','int','float','bool','bytes','complex'):
             if type(value) is not self.python_type: fail()
         elif kind in ('list','set','frozenset','sequence','deque','tuple_many','tuple',
-                      'mutable_sequence','abstract_set','mutable_set','collection'):
+                      'mutable_sequence','abstract_set','mutable_set','collection',
+                      'container','reversible'):
             expected = CONCRETE_SEQUENCE_TYPES.get(kind)
             if expected is not None and type(value) is not expected: fail()
             if kind == 'sequence' and type(value) not in (list,tuple,str,bytes,bytearray,memoryview,range):
                 fail('only non-consuming concrete sequences can be checked')
             if kind == 'mutable_sequence' and type(value) not in (list,bytearray): fail()
             if kind == 'abstract_set' and type(value) not in (set,frozenset): fail()
-            if kind == 'collection' and type(value) not in SAFE_COLLECTION_TYPES:
+            if kind in ('collection','container') and type(value) not in SAFE_COLLECTION_TYPES:
                 fail('only non-consuming concrete collections can be checked')
+            if kind == 'reversible' and type(value) not in SAFE_REVERSIBLE_TYPES:
+                fail('only non-consuming concrete reversible collections can be checked')
             if kind == 'tuple' and len(value) != len(self.args): fail('wrong tuple length')
             if kind != 'tuple' and self.args[0].kind in PRIMITIVE_KINDS:
                 member = self.args[0]
