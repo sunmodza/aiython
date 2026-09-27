@@ -43,11 +43,19 @@ SAFE_MAPPING_TYPES = (dict, defaultdict, OrderedDict, Counter)
 SAFE_COLLECTION_TYPES = (list, tuple, set, frozenset, dict, str, bytes,
                          bytearray, memoryview, range,
                          deque, defaultdict, OrderedDict, Counter)
+SAFE_VIEW_TYPES = {
+    'keys_view': (type({}.keys()), type(OrderedDict().keys())),
+    'values_view': (type({}.values()), type(OrderedDict().values())),
+    'items_view': (type({}.items()), type(OrderedDict().items())),
+}
+SAFE_VIEW_TYPES['mapping_view'] = tuple(kind for group in SAFE_VIEW_TYPES.values() for kind in group)
 CONTAINER_KINDS = {list:'list', set:'set', frozenset:'frozenset', dict:'dict',
                    deque:'deque', defaultdict:'defaultdict', OrderedDict:'ordered_dict',
                    Counter:'counter', ChainMap:'chainmap', abc.Sequence:'sequence', abc.Mapping:'mapping',
                    abc.MutableMapping:'mutable_mapping', abc.MutableSequence:'mutable_sequence',
-                   abc.Set:'abstract_set', abc.MutableSet:'mutable_set', abc.Collection:'collection'}
+                   abc.Set:'abstract_set', abc.MutableSet:'mutable_set', abc.Collection:'collection',
+                   abc.MappingView:'mapping_view', abc.KeysView:'keys_view',
+                   abc.ValuesView:'values_view', abc.ItemsView:'items_view'}
 
 
 class TypeViolation(CapabilityError, TypeError):
@@ -114,6 +122,11 @@ class Contract:
             result = {'type': 'array', 'items': self.args[0].schema(seen)}
         elif kind == 'collection':
             result = {'x-python-collection-items': self.args[0].schema(seen)}
+        elif kind in SAFE_VIEW_TYPES:
+            item = (self.args[0].schema(seen) if kind != 'items_view' else
+                    {'type':'array', 'prefixItems':[arg.schema(seen) for arg in self.args],
+                     'minItems':2, 'maxItems':2})
+            result = {'type':'array', 'items':item}
         elif kind == 'tuple':
             result = {'type': 'array', 'prefixItems': [a.schema(seen) for a in self.args],
                       'minItems': len(self.args), 'maxItems': len(self.args)}
@@ -247,6 +260,15 @@ class Contract:
                     child(self.args[0], key, f'.maps[{map_index}].keys[{index}]')
                     child(self.args[1], item, f'.maps[{map_index}][{key!r}]'
                           if type(key) in (str,int) else f'.maps[{map_index}].values[{index}]')
+        elif kind in SAFE_VIEW_TYPES:
+            if type(value) not in SAFE_VIEW_TYPES[kind]:
+                fail('only concrete mapping views can be checked deeply')
+            for index, item in enumerate(value):
+                if kind == 'items_view':
+                    child(self.args[0], item[0], f'[{index}][0]')
+                    child(self.args[1], item[1], f'[{index}][1]')
+                else:
+                    child(self.args[0], item, f'[{index}]')
         elif kind == 'typeddict':
             if type(value) is not dict: fail()
             missing = self.required - value.keys()
@@ -381,7 +403,8 @@ class Compiler:
                 raise UnsupportedType('Qualifier requires one type')
             return Contract('qualifier',label,args,qualifier=base._name)
         if origin in CONTAINER_KINDS:
-            expected = 2 if origin in (dict,abc.Mapping,abc.MutableMapping,defaultdict,OrderedDict,ChainMap) else 1
+            expected = (2 if origin in (dict,abc.Mapping,abc.MutableMapping,defaultdict,
+                                        OrderedDict,ChainMap,abc.ItemsView) else 1)
             if not args:
                 args = (Contract('any', 'Any'),) * expected
             if len(args) != expected:

@@ -18,6 +18,26 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_mapping_views_check_live_members(self):
+        namespace = {'typing': typing}
+        cases = (
+            ('typing.KeysView[str]', {'x': 1}.keys(), {1: 'x'}.keys()),
+            ('typing.ValuesView[int]', OrderedDict(x=1).values(),
+             OrderedDict(x='wrong').values()),
+            ('typing.ItemsView[str, int]', {'x': 1}.items(),
+             {'x': 'wrong'}.items()),
+            ('typing.MappingView[tuple[str, int]]', OrderedDict(x=1).items(),
+             OrderedDict(x='wrong').items()),
+        )
+        for annotation, valid, invalid in cases:
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                self.assertEqual(contract.schema()['type'], 'array')
+                contract.validate(valid)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(invalid)
+        tc.compile_contract('typing.MappingView', namespace).validate({'x': 1}.keys())
+
     def test_chainmap_checks_every_underlying_mapping(self):
         namespace = {'ChainMap': ChainMap, 'typing': typing}
         for annotation in ('ChainMap[str, int]', 'typing.ChainMap[str, int]'):

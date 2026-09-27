@@ -1140,6 +1140,15 @@ from typing import ChainMap as TypedChainMap
 layers: TypedChainMap[str, int] = ChainMap({'x': 1}, {'y': 2})
 print(layers['x'], layers['y'], len(layers.maps))
 ''',
+            'mapping view annotations': '''from collections import OrderedDict
+from typing import ItemsView, KeysView, MappingView, ValuesView
+mapping = OrderedDict(x=1, y=2)
+keys: KeysView[str] = mapping.keys()
+values: ValuesView[int] = mapping.values()
+items: ItemsView[str, int] = mapping.items()
+view: MappingView[tuple[str, int]] = items
+print(list(keys), list(values), list(items), list(view))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
