@@ -1178,6 +1178,14 @@ abstract: type[Sequence[int]] = list
 print(one('2'), none_type(), annotated('3'), same(str, 'four'),
       concrete([1, 2]), abstract([3]))
 ''',
+            'unpacked typed dict keyword arguments': '''from typing import NotRequired, TypedDict, Unpack
+class Options(TypedDict):
+    count: int
+    label: NotRequired[str]
+def describe(**kwargs: Unpack[Options]) -> tuple[int, str | None]:
+    return kwargs['count'], kwargs.get('label')
+print(describe(count=2), describe(count=3, label='ready'))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

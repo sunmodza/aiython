@@ -187,10 +187,10 @@ class Contract:
             if any(type(v) not in (str,int,bool,float,type(None)) for v in values):
                 raise UnsupportedType('Enum schema requires scalar member values')
             result = {'enum': values, 'x-python-enum-members': list(self.python_type.__members__)}
-        elif kind in ('typeddict', 'class') and self.fields:
+        elif kind == 'typeddict' or (kind == 'class' and self.fields):
             result = {'type':'object', 'properties':{k:v.schema(seen) for k,v in self.fields.items()},
                       'required': sorted(self.required)}
-        elif kind in ('annotated', 'qualifier', 'alias'):
+        elif kind in ('annotated', 'qualifier', 'alias', 'unpack_typeddict'):
             result = self.args[0].schema(seen)
         elif kind == 'typevar':
             result = {'anyOf':[a.schema(seen) for a in self.args]} if self.args else {}
@@ -220,7 +220,7 @@ class Contract:
             raise TypeViolation(f'{path}: expected {self.name}, got {type(value).__name__}' + (f' ({detail})' if detail else ''))
         def child(contract, item, suffix):
             contract.validate(item, path + suffix, bindings=bindings, seen=seen)
-        if kind in ('alias', 'annotated', 'qualifier'):
+        if kind in ('alias', 'annotated', 'qualifier', 'unpack_typeddict'):
             child(self.args[0], value, '')
         elif kind == 'never': fail('this boundary must not return')
         elif kind == 'union':
@@ -423,6 +423,14 @@ class Compiler:
         origin = typing.get_origin(base) or base
         if origin is typing.Unpack and len(args) == 1 and args[0].kind in ('unpack_any', 'unpack_fixed'):
             return args[0]
+        if origin is typing.Unpack and len(args) == 1:
+            unpacked = args[0]
+            visited = set()
+            while unpacked.kind in ('alias', 'annotated') and id(unpacked) not in visited:
+                visited.add(id(unpacked))
+                unpacked = unpacked.args[0]
+            if unpacked.kind == 'typeddict':
+                return Contract('unpack_typeddict', label, (unpacked,))
         if origin is abc.Callable:
             return Contract('callable',label,python_type=abc.Callable)
         if not args and origin in (abc.ByteString, abc.Iterable, abc.Iterator,

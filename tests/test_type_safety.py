@@ -72,6 +72,21 @@ def broken(x: T) -> T:
 broken(1)
 ''')
 
+    def test_unpack_typed_dict_keyword_arguments(self):
+        prelude = '''from typing import NotRequired, TypedDict, Unpack
+class Options(TypedDict):
+    count: int
+    label: NotRequired[str]
+def describe(**kwargs: Unpack[Options]) -> tuple[int, str | None]:
+    return kwargs['count'], kwargs.get('label')
+'''
+        result = self.run_source(prelude + "answer = describe(count=2, label='ready')\n")
+        self.assertEqual(result['answer'], (2, 'ready'))
+        for call in ('describe(count="bad")', 'describe(label="missing")',
+                     'describe(count=2, label=3)'):
+            with self.subTest(call=call), self.assertRaises(TypeViolation):
+                self.run_source(prelude + call + '\n')
+
     @unittest.skipIf(sys.version_info < (3, 12), "The type statement requires Python 3.12")
     def test_forward_local_alias_is_captured(self):
         self.assertEqual(self.run_source('''def factory():

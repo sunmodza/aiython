@@ -109,7 +109,9 @@ class TypeRuntime:
             contract = (Contract('any', 'Any') if unconstrained_variadic(source, mode, namespace)
                         else self.contract(source,namespace))
             if mode == 'args': contract = Contract('tuple_many',source,(contract,))
-            elif mode == 'kwargs': contract = Contract('dict',source,(compile_contract('str',namespace),contract))
+            elif mode == 'kwargs':
+                contract = (contract.args[0] if contract.kind == 'unpack_typeddict' else
+                            Contract('dict',source,(compile_contract('str',namespace),contract)))
             contract.validate(frame.f_locals[name],name,bindings=scope.bindings)
             scope.contracts[name] = contract
         if returns:

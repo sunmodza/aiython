@@ -20,6 +20,36 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_unpack_typed_dict_checks_keyword_mapping(self):
+        class Options(TypedDict):
+            count: int
+            label: typing.NotRequired[str]
+
+        namespace = {'Unpack': Unpack, 'Options': Options}
+        contract = tc.compile_contract('Unpack[Options]', namespace)
+        self.assertEqual(contract.kind, 'unpack_typeddict')
+        self.assertEqual(contract.schema()['required'], ['count'])
+        class EmptyOptions(TypedDict):
+            pass
+        empty_schema = tc.compile_contract('Unpack[EmptyOptions]',
+                                           {'Unpack': Unpack, 'EmptyOptions': EmptyOptions}).schema()
+        self.assertEqual(empty_schema['type'], 'object')
+        self.assertEqual(empty_schema['properties'], {})
+        alias = tc.TypeAliasType('OptionsAlias', Options)
+        tc.compile_contract('Unpack[OptionsAlias]',
+                            {'Unpack': Unpack, 'OptionsAlias': alias}).validate({'count': 2})
+        for annotation in ('Unpack[Options]', Unpack[Options]):
+            with self.subTest(annotation=annotation):
+                checked = tc.compile_contract(annotation, namespace)
+                checked.validate({'count': 2})
+                checked.validate({'count': 2, 'label': 'ready'})
+                with self.assertRaises(tc.TypeViolation):
+                    checked.validate({'count': 'wrong'})
+                with self.assertRaises(tc.TypeViolation):
+                    checked.validate({'label': 'missing count'})
+                with self.assertRaises(tc.TypeViolation):
+                    checked.validate({'count': 2, 'label': 3})
+
     def test_bare_abstract_annotations_do_not_consume_values(self):
         namespace = {'typing': typing}
         iterator = (item for item in range(2))
