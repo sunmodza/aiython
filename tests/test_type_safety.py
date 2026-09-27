@@ -102,6 +102,36 @@ child = Child()
         with self.assertRaises(TypeViolation):
             self.run_source(prelude + 'child.next = Node()\n')
 
+    def test_self_in_methods_with_renamed_receiver(self):
+        source = '''from typing import Self
+class Base:
+    def clone(this) -> Self:
+        return type(this)()
+    @classmethod
+    def create(klass) -> Self:
+        return klass()
+    @property
+    def same(this) -> Self:
+        return this
+    def keep(this):
+        local: Self = this
+        return local
+class Child(Base):
+    pass
+child = Child()
+answer = (type(child.clone()), type(Child.create()), type(child.same), type(child.keep()))
+'''
+        result = self.run_source(source)
+        self.assertEqual(result['answer'], (result['Child'],) * 4)
+        for method in ('''def clone(this) -> Self:
+        return Base()''', '''@classmethod
+    def create(klass) -> Self:
+        return Base()'''):
+            with self.subTest(method=method), self.assertRaises(TypeViolation):
+                self.run_source('from typing import Self\nclass Base:\n    ' + method +
+                                '\nclass Child(Base): pass\n' +
+                                ('Child.create()\n' if 'classmethod' in method else 'Child().clone()\n'))
+
     @unittest.skipIf(sys.version_info < (3, 12), "The type statement requires Python 3.12")
     def test_forward_local_alias_is_captured(self):
         self.assertEqual(self.run_source('''def factory():

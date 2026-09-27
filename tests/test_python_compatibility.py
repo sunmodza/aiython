@@ -1195,6 +1195,17 @@ head = Child()
 head.next = Child()
 print(type(head.next).__name__, head.next.next)
 ''',
+            'self with renamed method receivers': '''from typing import Self
+class Base:
+    def clone(this) -> Self: return type(this)()
+    @classmethod
+    def create(klass) -> Self: return klass()
+    @property
+    def same(this) -> Self: return this
+class Child(Base): pass
+child = Child()
+print(type(child.clone()).__name__, type(Child.create()).__name__, type(child.same).__name__)
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

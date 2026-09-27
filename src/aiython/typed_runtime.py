@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 import inspect
 import threading
+import types
 import typing
 import weakref
 
@@ -57,6 +58,7 @@ def unconstrained_variadic(source, mode, namespace):
 @dataclass
 class Scope:
     declarations: dict = field(default_factory=dict)
+    self_owner: type | None = None
     contracts: dict = field(default_factory=dict)
     bindings: dict = field(default_factory=dict)
     final_names: set = field(default_factory=set)
@@ -71,6 +73,7 @@ class TypeRuntime:
     def __init__(self, manager=None):
         self.manager = manager
         self.classes = weakref.WeakSet()
+        self.method_owners = weakref.WeakKeyDictionary()
         self._classes_lock = threading.RLock()
         self._contract_cache = threading.local()
 
@@ -91,7 +94,36 @@ class TypeRuntime:
         if isinstance(cls, type):
             with self._classes_lock:
                 self.classes.add(cls)
+                for member in type.__getattribute__(cls, '__dict__').values():
+                    if type(member) is types.FunctionType:
+                        methods = (member,)
+                    elif type(member) is classmethod:
+                        methods = (member.__func__,)
+                    elif type(member) is property:
+                        methods = (member.fget, member.fset, member.fdel)
+                    else:
+                        continue
+                    for method in methods:
+                        visited = set()
+                        while type(method) is types.FunctionType and id(method) not in visited:
+                            visited.add(id(method))
+                            owners = self.method_owners.setdefault(method.__code__, weakref.WeakSet())
+                            owners.add(cls)
+                            method = vars(method).get('__wrapped__')
         return cls
+
+    def method_self_owner(self, frame):
+        with self._classes_lock:
+            owners = tuple(self.method_owners.get(frame.f_code, ()))
+        if not owners or not frame.f_code.co_argcount:
+            return None
+        receiver = frame.f_locals.get(frame.f_code.co_varnames[0])
+        receiver_type = type(receiver)
+        candidate = receiver if issubclass(receiver_type, type) else receiver_type
+        mro = type.__getattribute__(candidate, '__mro__')
+        if any(owner in mro for owner in owners):
+            return candidate
+        return owners[0] if len(owners) == 1 else None
 
     @staticmethod
     def namespace(frame):
@@ -99,11 +131,15 @@ class TypeRuntime:
         scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
         if isinstance(scope,Scope):
             namespace.update({parameter.__name__: bound for parameter,bound in scope.bindings.items()})
+            if scope.self_owner is not None:
+                namespace[SELF_OWNER] = scope.self_owner
         return namespace
 
     def _initialize(self, frame, declarations, parameters, returns):
-        scope = Scope(declarations=declarations)
+        scope = Scope(declarations=declarations, self_owner=self.method_self_owner(frame))
         namespace = self.namespace(frame)
+        if scope.self_owner is not None:
+            namespace[SELF_OWNER] = scope.self_owner
         for name, (source, mode) in (parameters or {}).items():
             # Unbound variadic type parameters have no concrete element types
             # to check at this call boundary.

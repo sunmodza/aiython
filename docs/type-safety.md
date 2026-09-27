@@ -45,6 +45,8 @@ Primitive checks are strict: no string-to-number conversion, and bool does not p
 
 `Mapping[K, V]` and `MutableMapping[K, V]` check concrete `dict`, `defaultdict`, `OrderedDict`, and `Counter` values deeply.
 
+`Self` follows the class of the actual method receiver, including subclass calls and methods whose receiver is not named `self` or `cls`.
+
 Annotations are interpreted rather than passed to `eval`. On Python 3.14+, Aiython uses string-format annotation introspection; on 3.11–3.13, it reads stored annotations without evaluating strings. Type aliases on 3.12–3.13 use Python's lazy alias value machinery, which can evaluate code supplied by the alias author. Custom annotation machinery and custom validators are trusted Python code, not sandboxed code.
 
 `aiython.type_constraints.register_validator(Class, validator)` supplies a custom runtime predicate. A class validator returns true for a valid value. It can also provide the structural check for a Protocol that Aiython cannot prove automatically.
