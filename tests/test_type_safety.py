@@ -385,6 +385,15 @@ class Item(BaseModel):
         with self.assertRaises(TypeViolation):
             self.run_source(private + "item = Item()\nitem._cache.append('bad')\n")
 
+        factory = '''from attrs import define, Factory
+@define
+class Item:
+    values: list[int] = Factory(list)
+'''
+        self.assertEqual(self.run_source(factory + 'answer = Item().values\n')['answer'], [])
+        with self.assertRaises(TypeViolation):
+            self.run_source(factory + "item = Item()\nitem.values.append('bad')\n")
+
     def test_descriptor_annotation_checks_resolved_instance_value(self):
         prelude = '''class Field:
     def __get__(self, instance, owner=None):

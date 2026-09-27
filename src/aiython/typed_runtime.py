@@ -164,7 +164,8 @@ class TypeRuntime:
             return True
         for module_name, class_name in (('pydantic.fields', 'FieldInfo'),
                                         ('pydantic.fields', 'ModelPrivateAttr'),
-                                        ('attr._make', '_CountingAttr')):
+                                        ('attr._make', '_CountingAttr'),
+                                        ('attr._make', 'Factory')):
             module = sys.modules.get(module_name)
             if module is not None and kind is vars(module).get(class_name):
                 return True

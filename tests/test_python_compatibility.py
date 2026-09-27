@@ -1030,6 +1030,14 @@ class Point:
     x: int = field(default=1)
 print(Point().x)
 ''',
+            'attrs Factory default': '''from attrs import define, Factory
+@define
+class Point:
+    values: list[int] = Factory(list)
+point = Point()
+point.values.append(2)
+print(point.values)
+''',
             'annotated Python descriptors': '''from functools import cached_property
 class Field:
     def __set_name__(self, owner, name):
