@@ -57,6 +57,8 @@ aiython tickets.py
 
 Use a project environment when your script imports other project dependencies; a uv tool has its own isolated environment. [Setup and configuration](docs/configuration.md) covers profiles, custom endpoints, and capability routes.
 
+Run an importable module or package with `aiython -m package.module` or `aiython -m package`; pass its arguments after the module name.
+
 Ordinary Python runs without loading LiteLLM or contacting a provider. Reasoning calls use the [LiteLLM Python SDK](https://docs.litellm.ai/docs/) in process; no proxy service is needed.
 
 ## The execution boundary

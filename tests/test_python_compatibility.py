@@ -1,16 +1,176 @@
 """Compare ordinary Python execution with Aiython in separate processes."""
 
+import json
+import os
+import py_compile
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from aiython.cli import run_script
+from aiython.cli import main, module_source, run_script
 
 
 class PythonCompatibilityTests(unittest.TestCase):
+    def test_module_startup_without_existing_main_restores_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'standalone.py').write_text('value = 1\n')
+            for version, annotations_present in (((3, 13), True), ((3, 14), False)):
+                with self.subTest(version=version), patch.dict(sys.modules, {'__main__': None}), \
+                        patch('pathlib.Path.cwd', return_value=root), patch.object(sys, 'path', sys.path[:]), \
+                        patch('aiython.cli.sys.version_info', version):
+                    spec, source, code, initial_main = module_source('standalone')
+                    self.assertNotIn('__main__', sys.modules)
+                    self.assertEqual(spec.name, 'standalone')
+                    self.assertEqual(source, 'value = 1\n')
+                    self.assertEqual(code.co_name, '<module>')
+                    self.assertEqual(initial_main.__name__, '__main__')
+                    self.assertEqual('__annotations__' in vars(initial_main), annotations_present)
+
+    def test_safe_path_module_mode_matches_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'safemodule.py').write_text('import sys\nprint(sys.flags.safe_path, sys.path[:2])\n')
+            environment = {**os.environ, 'PYTHONPATH': str(root) + os.pathsep + os.environ.get('PYTHONPATH', '')}
+            python = subprocess.run([sys.executable, '-P', '-m', 'safemodule'], cwd=root, env=environment,
+                                    capture_output=True, text=True)
+            aiython = subprocess.run([sys.executable, '-P', '-m', 'aiython', '-m', 'safemodule'], cwd=root,
+                                     env=environment, capture_output=True, text=True)
+            self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                             (python.returncode, python.stdout, python.stderr))
+
+    def test_parent_package_startup_matches_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / 'startup'
+            package.mkdir()
+            (package / '__init__.py').write_text('''import sys
+initial_main = sys.modules['__main__']
+if hasattr(initial_main, '__annotations__'):
+    initial_main.__annotations__['from_init'] = int
+print(sys.argv, sys.orig_argv, initial_main.__spec__, '__file__' in vars(initial_main))
+''')
+            (package / 'module.py').write_text('''import sys
+from . import initial_main
+print(initial_main is sys.modules['__main__'], 'from_init' in globals().get('__annotations__', {}), sys.path[0])
+''')
+            python = subprocess.run([sys.executable, '-B', '-m', 'startup.module', 'arg'], cwd=root,
+                                    capture_output=True, text=True)
+            aiython = subprocess.run([sys.executable, '-B', '-m', 'aiython', '-m', 'startup.module', 'arg'],
+                                     cwd=root, capture_output=True, text=True)
+            self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                             (python.returncode, python.stdout, python.stderr))
+
+    def test_console_entry_point_finds_current_directory_modules(self):
+        console = Path(sys.executable).with_name('aiython')
+        self.assertTrue(console.is_file())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'localmodule.py').write_text('import sys\nprint(sys.argv, sys.orig_argv, sys.path[0])\n')
+            python = subprocess.run([sys.executable, '-m', 'localmodule', 'arg'], cwd=root,
+                                    capture_output=True, text=True)
+            aiython = subprocess.run([str(console), '-m', 'localmodule', 'arg'], cwd=root,
+                                     capture_output=True, text=True)
+            self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                             (python.returncode, python.stdout, python.stderr))
+
+    def test_embedded_module_run_restores_host_import_path(self):
+        original_path = sys.path[:]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'embedded_module.py').write_text('value = 1\n')
+            with patch('pathlib.Path.cwd', return_value=root):
+                main(['-m', 'embedded_module'])
+        self.assertEqual(sys.path, original_path)
+
+    def test_module_and_package_execution_match_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / 'example'
+            package.mkdir()
+            (package / '__init__.py').write_text('value = 7\n')
+            source = '''import atexit, sys
+from . import value
+print(value, __name__, __package__, __spec__.name, __file__, __cached__)
+print(sys.argv, sys.orig_argv, sys.path[0])
+atexit.register(lambda: print('EXIT', sys.modules['__main__'].__file__,
+                              sys.modules['__main__'].__cached__))
+'''
+            (package / 'module.py').write_text(source)
+            (package / '__main__.py').write_text(source)
+            for name in ('example.module', 'example'):
+                with self.subTest(name=name):
+                    python = subprocess.run([sys.executable, '-m', name, 'one', '-x'], cwd=root,
+                                            capture_output=True, text=True)
+                    aiython = subprocess.run([sys.executable, '-m', 'aiython', '-m', name, 'one', '-x'], cwd=root,
+                                             capture_output=True, text=True)
+                    self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                                     (python.returncode, python.stdout, python.stderr))
+
+    def test_zip_and_sourceless_module_execution_match_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / 'modules.zip'
+            with zipfile.ZipFile(archive, 'w') as package:
+                package.writestr('zipmodule.py',
+                                 'import sys\nprint(__name__, __spec__.name, __file__, sys.argv)\n')
+            source = root / 'sourceless.py'
+            source.write_text('import sys\nprint(__file__, __cached__, sys.argv, sys.orig_argv)\n')
+            py_compile.compile(str(source), cfile=str(root / 'sourceless.pyc'), doraise=True)
+            source.unlink()
+            environment = {**os.environ, 'PYTHONPATH': str(archive) + os.pathsep + os.environ.get('PYTHONPATH', '')}
+            for name in ('zipmodule', 'sourceless'):
+                with self.subTest(name=name):
+                    python = subprocess.run([sys.executable, '-m', name, 'arg'], cwd=root, env=environment,
+                                            capture_output=True, text=True)
+                    aiython = subprocess.run([sys.executable, '-m', 'aiython', '-m', name, 'arg'], cwd=root,
+                                             env=environment, capture_output=True, text=True)
+                    self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
+                                     (python.returncode, python.stdout, python.stderr))
+
+    def test_module_cli_reports_invalid_requests(self):
+        for arguments, expected in ((['-m'], '-m requires a module name'),
+                                    (['-m', 'module_that_does_not_exist'], 'No module named'),
+                                    (['--stats'], 'a script path or -m module is required')):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, '-m', 'aiython', *arguments],
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'sourceless.py'
+            source.write_text('value = 1\n')
+            py_compile.compile(str(source), cfile=str(root / 'sourceless.pyc'), doraise=True)
+            source.unlink()
+            result = subprocess.run([sys.executable, '-m', 'aiython', '--explain', '-m', 'sourceless'],
+                                    cwd=root, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Cannot explain a module without Python source', result.stderr)
+
+    def test_module_config_comes_from_invoking_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'project'
+            project.mkdir()
+            config = project / 'aiython.toml'
+            config.write_text('version=3\nmodel="openai/test"\n')
+            external = root / 'external'
+            external.mkdir()
+            (external / 'externalmod.py').write_text('print("ok")\n')
+            environment = {**os.environ, 'PYTHONPATH': str(external) + os.pathsep + os.environ.get('PYTHONPATH', '')}
+            result = subprocess.run([sys.executable, '-m', 'aiython', '--explain', '-m', 'externalmod'],
+                                    cwd=project, env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['config']['config'], str(config))
+            result = subprocess.run([sys.executable, '-m', 'aiython', '-m', 'externalmod'],
+                                    cwd=project, env=environment, capture_output=True, text=True)
+            self.assertEqual((result.returncode, result.stdout), (0, 'ok\n'), result.stderr)
+
     def test_safe_path_modes_match_cpython(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'main.py'

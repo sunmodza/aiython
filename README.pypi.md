@@ -48,6 +48,8 @@ Python owns statement order, loops, assignments, and side effects. AI works at t
 
 Use `aiython --help` to see the CLI, `aiython config show` to inspect configuration, and `aiython --stats tickets.py` to see model calls and timings. Additional routes for vision, documents, embeddings, reranking, speech, images, and video are configured only when needed.
 
+Run an importable module or package with `aiython -m package.module` or `aiython -m package`; pass its arguments after the module name.
+
 Aiython is not a sandbox. Frame tools can use `eval` and `exec` with your process permissions, and relevant source or object data may be sent to your configured provider. Use trusted code and review provider data handling.
 
 Licensed under MIT.

@@ -64,6 +64,8 @@ Model IDs use LiteLLM syntax. A route can also be `{ model = "...", api_base = "
 
 Run `aiython config show --script PATH` to inspect resolved settings. `--config` chooses an exact file. `--profile` selects a default named profile; `--force-profile` overrides source directives. CLI options for script execution go before the script path, while later arguments go to the program.
 
+Run an importable module or package with `aiython -m package.module` or `aiython -m package`. Put Aiython options before `-m`; arguments after the module name go to that module. Packages need a `__main__.py`, as with `python -m`. Source files get Aiython's source transformation; modules available only as bytecode run as Python bytecode. Resolving a dotted name for `--explain -m` imports its parent package.
+
 Version 1 and 2 configs are rejected with migration guidance and never overwritten. Move the old reasoning model to top-level `model`, put other routes under `[capabilities]`, and replace direct keys with `api_key_env` plus a private env file. Runtime state starts fresh in `.aiython/runtime-v3.sqlite`; older databases remain untouched.
 
 ## Deadlines and jobs
