@@ -64,7 +64,7 @@ Model IDs use LiteLLM syntax. A route can also be `{ model = "...", api_base = "
 
 Run `aiython config show --script PATH` to inspect resolved settings. `--config` chooses an exact file. `--profile` selects a default named profile; `--force-profile` overrides source directives. CLI options for script execution go before the script path, while later arguments go to the program.
 
-Run an importable module or package with `aiython -m package.module` or `aiython -m package`. Put Aiython options before `-m`; arguments after the module name go to that module. Packages need a `__main__.py`, as with `python -m`. Source files get Aiython's source transformation; modules available only as bytecode run as Python bytecode. Resolving a dotted name for `--explain -m` imports its parent package.
+Run an importable module or package with `aiython -m package.module` or `aiython -m package`. Put Aiython options before `-m`; arguments after the module name go to that module. Packages need a `__main__.py`, as with `python -m`. Source files get Aiython's source transformation; modules available only as bytecode run as Python bytecode. During execution, project parent packages with AI statements are transformed too. `--explain -m` imports the parent package using ordinary Python, so it cannot explain a module whose parent package requires AI syntax.
 
 The CLI also accepts `aiython -c 'print(1)'`, `aiython -` for source from stdin, and a directory or zipapp containing `__main__.py`. Arguments after the command, `-`, or path go to the program. For `-c` and stdin, Aiython searches for `aiython.toml` from the current directory. A direct `.pyc` file and source-less `__main__.pyc` run as Python bytecode without source transformation or `--explain` output.
 

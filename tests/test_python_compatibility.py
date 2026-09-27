@@ -1,5 +1,6 @@
 """Compare ordinary Python execution with Aiython in separate processes."""
 
+import importlib
 import json
 import os
 import py_compile
@@ -7,14 +8,70 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from aiython.cli import main, module_source, run_script
+from aiython.cli import ModuleStartFinder, main, module_details, module_source, run_script
+from aiython.models import AiythonError, ProfileConfig, ResolvedConfig
+from aiython.runtime import Runtime
 
 
 class PythonCompatibilityTests(unittest.TestCase):
+    def test_module_resolution_errors_are_explicit(self):
+        with self.assertRaisesRegex(AiythonError, 'Relative module names not supported'):
+            module_details('.relative')
+        with self.assertRaisesRegex(AiythonError, 'Error while finding module specification'):
+            module_details('missing_parent_for_aiython.child')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / 'empty_package_for_aiython'
+            package.mkdir()
+            (package / '__init__.py').write_text('')
+            with patch.object(sys, 'path', [str(root), *sys.path]):
+                with self.assertRaisesRegex(AiythonError, 'is a package and cannot be directly executed'):
+                    module_details('empty_package_for_aiython')
+                nested_main = package / '__main__'
+                nested_main.mkdir()
+                (nested_main / '__init__.py').write_text('')
+                importlib.invalidate_caches()
+                with self.assertRaisesRegex(AiythonError, 'Cannot use package as __main__ module'):
+                    module_details('empty_package_for_aiython.__main__')
+        no_loader = SimpleNamespace(submodule_search_locations=None, loader=None)
+        no_code = SimpleNamespace(submodule_search_locations=None,
+                                  loader=SimpleNamespace(get_source=lambda _: None, get_code=lambda _: None))
+        for spec, expected in ((no_loader, 'namespace package and cannot be executed'),
+                               (no_code, 'No code object available')):
+            with self.subTest(expected=expected), patch('aiython.cli.importlib.util.find_spec', return_value=spec):
+                with self.assertRaisesRegex(AiythonError, expected):
+                    module_details('custom_loader')
+
+    def test_module_start_finder_leaves_sourceless_loaders_unchanged(self):
+        runtime = Runtime(ResolvedConfig(None, Path.cwd()))
+        loader = SimpleNamespace(get_source=lambda _: None)
+        spec = SimpleNamespace(loader=loader, origin='sourceless.pyc')
+        with patch('aiython.cli.ProjectFinder.find_spec', return_value=spec):
+            self.assertIsNone(ModuleStartFinder(runtime).find_spec('sourceless'))
+        runtime.capabilities.close()
+
+    def test_module_resolution_warns_when_parent_imports_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / 'early_import_package'
+            package.mkdir()
+            (package / '__init__.py').write_text('from . import task\n')
+            (package / 'task.py').write_text('value = 1\n')
+            with patch.object(sys, 'path', [str(root), *sys.path]), warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always', RuntimeWarning)
+                spec, source, code = module_details('early_import_package.task')
+            self.assertEqual(spec.name, 'early_import_package.task')
+            self.assertEqual(source, 'value = 1\n')
+            self.assertIsNone(code)
+            self.assertEqual(len(caught), 1)
+            self.assertIn('found in sys.modules after import of package', str(caught[0].message))
+
     def test_command_and_stdin_execution_match_cpython(self):
         source = '''import atexit, inspect, sys
 def report(stage):
@@ -164,9 +221,58 @@ atexit.register(report)
                     self.assertNotIn('__main__', sys.modules)
                     self.assertEqual(spec.name, 'standalone')
                     self.assertEqual(source, 'value = 1\n')
-                    self.assertEqual(code.co_name, '<module>')
+                    self.assertIsNone(code)
                     self.assertEqual(initial_main.__name__, '__main__')
                     self.assertEqual('__annotations__' in vars(initial_main), annotations_present)
+
+    def test_module_with_ai_source_uses_aiython_compiler(self):
+        class Agent:
+            def execute(self, request, runtime):
+                return 7
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / 'ai_source_package'
+            package.mkdir()
+            (package / '__init__.py').write_text('value = 1\n')
+            (package / 'task.py').write_text('answer = compute the answer\n')
+            with patch('pathlib.Path.cwd', return_value=root), patch.object(sys, 'path', sys.path[:]):
+                spec, source, code, initial_main = module_source('ai_source_package.task')
+                self.assertIsNone(code)
+                self.assertIn('compute the answer', source)
+                config = ResolvedConfig(None, root, 'default',
+                                        {'default': ProfileConfig('default', 'fake', 'test')})
+                namespace = run_script(Path(spec.origin), config=config, agent_factory=lambda _: Agent(),
+                                       source=source, module_spec=spec, module_invocation='ai_source_package.task',
+                                       initial_main=initial_main, entry_kind='module')
+                self.assertEqual(namespace['answer'], 7)
+            result = subprocess.run([sys.executable, '-m', 'aiython', '--explain', '-m', 'ai_source_package.task'],
+                                    cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(json.loads(result.stdout)['blocks']), 1)
+
+    def test_module_parent_package_with_ai_source_uses_same_runtime(self):
+        class Agent:
+            def execute(self, request, runtime):
+                return 7
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / 'ai_parent_package'
+            package.mkdir()
+            (package / '__init__.py').write_text('prefix = decide a number\n')
+            (package / 'task.py').write_text('from . import prefix\nanswer = decide another number\n')
+            config = ResolvedConfig(None, root, 'default',
+                                    {'default': ProfileConfig('default', 'fake', 'test')})
+            runtime = Runtime(config, agent_factory=lambda _: Agent())
+            with patch('pathlib.Path.cwd', return_value=root), patch.object(sys, 'path', sys.path[:]):
+                spec, source, code, initial_main = module_source('ai_parent_package.task', runtime=runtime)
+                self.assertIsNone(code)
+                self.assertEqual(type(spec.loader).__name__, 'SourceFileLoader')
+                namespace = run_script(Path(spec.origin), config=config, runtime=runtime,
+                                       source=source, module_spec=spec, module_invocation='ai_parent_package.task',
+                                       initial_main=initial_main, entry_kind='module')
+                self.assertEqual((namespace['prefix'], namespace['answer']), (7, 7))
 
     def test_safe_path_module_mode_matches_cpython(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -272,6 +378,7 @@ atexit.register(lambda: print('EXIT', sys.modules['__main__'].__file__,
     def test_module_cli_reports_invalid_requests(self):
         for arguments, expected in ((['-m'], '-m requires a module name'),
                                     (['-m', 'module_that_does_not_exist'], 'No module named'),
+                                    (['--explain', '-m', 'module_that_does_not_exist'], 'No module named'),
                                     (['--stats'], 'a script path or -m module is required')):
             with self.subTest(arguments=arguments):
                 result = subprocess.run([sys.executable, '-m', 'aiython', *arguments],

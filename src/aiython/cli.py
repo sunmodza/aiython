@@ -6,12 +6,13 @@ import builtins
 import importlib.abc
 import importlib.machinery
 import importlib.metadata
+import importlib.util
 import json
 import os
-import runpy
 import sys
 import tokenize
 import types
+import warnings
 import zipfile
 from pathlib import Path
 from time import perf_counter
@@ -60,6 +61,23 @@ class ProjectFinder(importlib.abc.MetaPathFinder):
         return spec
 
 
+class ModuleStartFinder(ProjectFinder):
+    """Transform project imports with AI syntax while -m resolves its target."""
+
+    def find_spec(self, fullname, path=None, target=None):
+        spec = super().find_spec(fullname, path, target)
+        if spec is None:
+            return None
+        source = spec.loader.get_source(fullname)
+        if source is None:
+            return None
+        try:
+            compile(source, spec.origin, "exec", dont_inherit=True)
+        except SyntaxError:
+            return spec
+        return None
+
+
 def interpreter_arguments():
     original = sys.orig_argv
     for index in range(len(original) - 1):
@@ -68,7 +86,40 @@ def interpreter_arguments():
     return [sys.executable]
 
 
-def module_source(name, arguments=()):
+def module_details(name):
+    if name.startswith("."):
+        raise AiythonError("Relative module names not supported")
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        raise AiythonError(f"Error while finding module specification for {name!r} "
+                           f"({type(exc).__name__}: {exc})") from None
+    parent = name.rpartition(".")[0]
+    existing = sys.modules.get(name)
+    if parent and existing is not None and not hasattr(existing, "__path__"):
+        warnings.warn(f"{name!r} found in sys.modules after import of package {parent!r}, "
+                      f"but prior to execution of {name!r}; this may result in unpredictable behaviour",
+                      RuntimeWarning, stacklevel=2)
+    if spec is None:
+        raise AiythonError(f"No module named {name}")
+    if spec.submodule_search_locations is not None:
+        if name == "__main__" or name.endswith(".__main__"):
+            raise AiythonError("Cannot use package as __main__ module")
+        try:
+            return module_details(name + ".__main__")
+        except AiythonError as exc:
+            raise AiythonError(f"{exc}; {name!r} is a package and cannot be directly executed") from None
+    loader = spec.loader
+    if loader is None:
+        raise AiythonError(f"{name!r} is a namespace package and cannot be executed")
+    source = getattr(loader, "get_source", lambda _: None)(name)
+    code = loader.get_code(name) if source is None else None
+    if code is None and source is None:
+        raise AiythonError(f"No code object available for {name}")
+    return spec, source, code
+
+
+def module_source(name, arguments=(), *, runtime=None):
     old_main = sys.modules.get("__main__")
     old_argv, old_orig_argv = sys.argv, sys.orig_argv
     interpreter_args = interpreter_arguments()
@@ -77,24 +128,27 @@ def module_source(name, arguments=()):
     initial_main.__builtins__ = builtins
     if sys.version_info < (3, 14):
         initial_main.__annotations__ = {}
+    finder = ModuleStartFinder(runtime) if runtime is not None else None
     try:
         sys.modules["__main__"] = initial_main
         sys.argv = ["-m", *arguments]
         sys.orig_argv = [*interpreter_args, "-m", name, *arguments]
         if not sys.flags.safe_path:
             sys.path[:1] = [str(Path.cwd())]
-        actual_name, spec, code = runpy._get_module_details(name)
-    except ImportError as exc:
-        raise AiythonError(str(exc)) from None
+        if finder is not None:
+            sys.meta_path.insert(0, finder)
+        spec, source, code = module_details(name)
     finally:
+        if finder is not None:
+            sys.meta_path.remove(finder)
         sys.argv = old_argv
         sys.orig_argv = old_orig_argv
         if old_main is not None:
             sys.modules["__main__"] = old_main
         else:
             sys.modules.pop("__main__", None)
-    loader = spec.loader
-    source = getattr(loader, "get_source", lambda _: None)(actual_name)
+    if isinstance(spec.loader, ProjectLoader):
+        spec.loader = importlib.machinery.SourceFileLoader(spec.name, spec.origin)
     return spec, source, code, initial_main
 
 
@@ -109,8 +163,9 @@ def path_source(path):
 def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, stats=False, trace_plan=False,
                config_path=None, profile=None, force_profile=None, restore_state=True,
                source=None, module_spec=None, module_invocation=None, compiled_code=None, initial_main=None,
-               entry_kind="file", entry_argument=None):
-    started = perf_counter()
+               entry_kind="file", entry_argument=None, runtime=None, preparation_started=None,
+               resolved_seconds=None):
+    started = preparation_started if preparation_started is not None else perf_counter()
     argv0 = ("-c" if entry_kind == "command" else "-" if entry_kind == "stdin" else
              module_spec.origin if entry_kind == "module" else entry_argument if entry_kind == "path" else str(path))
     display_path = ("<string>" if entry_kind == "command" else "<stdin>" if entry_kind == "stdin" else
@@ -120,8 +175,8 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                      Path(entry_argument).absolute() / "__main__.py" if entry_kind == "path" and
                      Path(entry_argument).is_dir() else path)
     config = config or resolve(config_source, config_path=config_path, profile=profile, force_profile=force_profile)
-    config_seconds = perf_counter() - started
-    runtime = Runtime(config, agent_factory=agent_factory, stats=stats, trace_plan=trace_plan)
+    config_seconds = resolved_seconds if resolved_seconds is not None else perf_counter() - started
+    runtime = runtime or Runtime(config, agent_factory=agent_factory, stats=stats, trace_plan=trace_plan)
     code = (compiled_code if compiled_code is not None else
             runtime.compile_source(read_source(path) if source is None else source, str(display_path), entry=True))
     module = initial_main or types.ModuleType("__main__")
@@ -269,13 +324,26 @@ def main(argv=None):
         argument_parser = parser()
         args = argument_parser.parse_args(arguments)
         module_spec = source = module_invocation = compiled_code = initial_main = entry_argument = None
+        module_config = module_runtime = module_started = module_config_seconds = None
         entry_kind = "file"
         if args.module_args is not None:
             if not args.module_args:
                 argument_parser.error("-m requires a module name")
             module_invocation, *script_args = args.module_args
-            module_spec, source, original_code, initial_main = module_source(module_invocation, script_args)
-            path = Path(module_spec.origin or original_code.co_filename)
+            if not args.explain:
+                module_started = perf_counter()
+                module_config = resolve(Path.cwd() / "__main__.py", config_path=args.config,
+                                        profile=args.profile, force_profile=args.force_profile)
+                module_config_seconds = perf_counter() - module_started
+                module_runtime = Runtime(module_config, stats=args.stats, trace_plan=args.trace_plan)
+            try:
+                module_spec, source, original_code, initial_main = module_source(
+                    module_invocation, script_args, runtime=module_runtime)
+            except BaseException:
+                if module_runtime is not None:
+                    module_runtime.capabilities.close()
+                raise
+            path = Path(module_spec.origin or (original_code.co_filename if original_code else module_invocation))
             entry_kind = "module"
             if source is None:
                 compiled_code = original_code
@@ -323,12 +391,13 @@ def main(argv=None):
                 "checkpoints": [{"span": vars(c.span), "statement": c.statement}
                                 for c in runtime.checkpoints.values()]}, ensure_ascii=False, indent=2))
             return
-        run_script(path, script_args, config_path=args.config, profile=args.profile,
+        run_script(path, script_args, config=module_config, config_path=args.config, profile=args.profile,
                    force_profile=args.force_profile, stats=args.stats, trace_plan=args.trace_plan,
                    restore_state=argv is not None, source=source,
                    module_spec=module_spec, module_invocation=module_invocation,
                    compiled_code=compiled_code, initial_main=initial_main,
-                   entry_kind=entry_kind, entry_argument=entry_argument)
+                   entry_kind=entry_kind, entry_argument=entry_argument, runtime=module_runtime,
+                   preparation_started=module_started, resolved_seconds=module_config_seconds)
     except AiythonError as exc:
         # Keep the original runtime cause visible without leaking provider internals.
         if exc.__cause__:
