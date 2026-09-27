@@ -14,6 +14,42 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_inherited_generic_fields_use_base_type_arguments(self):
+        variable = TypeVar('T')
+        item = TypeVar('Item')
+
+        class Base(Generic[variable]):
+            value: variable
+            def __init__(self, value): self.value = value
+
+        class Middle(Base[list[item]], Generic[item]):
+            pass
+
+        class Leaf(Middle[int]):
+            pass
+
+        contract = tc.compile_contract(Leaf, locals())
+        contract.validate(Leaf([1, 2]))
+        with self.assertRaises(tc.TypeViolation):
+            contract.validate(Leaf(['wrong']))
+
+    @unittest.skipIf(sys.version_info < (3, 12), 'generic class syntax requires Python 3.12')
+    def test_inherited_pep695_fields_keep_each_class_parameter_scope(self):
+        namespace = {'__name__': __name__}
+        exec('class Base[T]:\n'
+             '    value: T\n'
+             '    def __init__(self, value): self.value = value\n'
+             'class Child[T](Base[str]):\n'
+             '    other: T\n'
+             '    def __init__(self, value, other):\n'
+             '        super().__init__(value)\n'
+             '        self.other = other\n', namespace)
+        contract = tc.compile_contract('Child[int]', namespace)
+        contract.validate(namespace['Child']('ok', 1))
+        for value, other in ((1, 1), ('ok', 'wrong')):
+            with self.subTest(value=value, other=other), self.assertRaises(tc.TypeViolation):
+                contract.validate(namespace['Child'](value, other))
+
     @unittest.skipIf(sys.version_info < (3, 12), 'generic class syntax requires Python 3.12')
     def test_variadic_generic_class_specialization(self):
         namespace = {'__name__': __name__}

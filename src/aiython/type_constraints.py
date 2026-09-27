@@ -420,12 +420,35 @@ class Compiler:
         scope.update({k:v for k,v in names.items()
                       if (issubclass(type(v), Contract) or
                           (type(v) is tuple and all(issubclass(type(item), Contract) for item in v)))})
+        # Each class owns its annotation namespace. A subclass can bind an
+        # inherited parameter through Base[int] or through several generic
+        # intermediate classes, even when it has no parameters of its own.
+        scopes = {target: scope}
+        pending = [target]
+        while pending:
+            current = pending.pop(0)
+            current_scope = scopes[current]
+            for original in vars(current).get('__orig_bases__', current.__bases__):
+                base = typing.get_origin(original) or original
+                if not isinstance(base, type) or base in scopes or base not in current.__bases__:
+                    continue
+                base_scope = self.module_names(base, current_scope) | {base.__name__: base}
+                parameters = getattr(base, '__type_params__', ()) or getattr(base, '__parameters__', ())
+                arguments = typing.get_args(original)
+                if parameters and arguments:
+                    compiled = tuple(self.compile(arg, current_scope) for arg in arguments)
+                    base_scope.update(self.parameter_bindings(parameters, compiled, current_scope,
+                                                              'Generic type argument count mismatch'))
+                else:
+                    base_scope.update({parameter.__name__: parameter for parameter in parameters})
+                scopes[base] = base_scope
+                pending.append(base)
         fields = {}
         for base in reversed(target.__mro__):
             if base in (object,dict): continue
-            fields.update(annotations_of(base))
-        for name, source in fields.items():
-            contract = self.compile(source,scope)
+            fields.update({name: (source, base) for name, source in annotations_of(base).items()})
+        for name, (source, owner) in fields.items():
+            contract = self.compile(source, scopes.get(owner, scope))
             if contract.marker == 'ClassVar':
                 continue
             result.fields[name] = contract

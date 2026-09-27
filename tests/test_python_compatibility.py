@@ -1092,6 +1092,14 @@ print(first, second)
 box: Box[int, str] = Box((1, 'x'))
 print(box.value)
 '''
+            cases['inherited generic fields'] = '''class Base[T]:
+    value: T
+    def __init__(self, value): self.value = value
+class Middle[U](Base[list[U]]): pass
+class Leaf(Middle[int]): pass
+leaf: Leaf = Leaf([1, 2])
+print(leaf.value)
+'''
         if sys.version_info >= (3, 13):
             cases['defaulted type aliases'] = '''type Pair[T, U = str] = tuple[T, U]
 type Variadic[T, *Ts, U = str] = tuple[T, *Ts, U]
