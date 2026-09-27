@@ -82,6 +82,7 @@ class Contract:
             members = [type(v).__qualname__ + '.' + v.name for v in self.args if isinstance(v,enum.Enum)]
             if members: result['x-python-enum-members'] = members
         elif kind == 'null': result = {'type': 'null'}
+        elif kind == 'callable': result = {'x-python-callable': True}
         elif kind in ('str', 'int', 'float', 'bool'):
             result = {'type': {'str':'string', 'int':'integer', 'float':'number', 'bool':'boolean'}[kind]}
         elif kind in ('list', 'set', 'frozenset', 'sequence'):
@@ -119,6 +120,10 @@ class Contract:
         # successful path free of sets, closures and diagnostic strings.
         kind = self.kind
         if kind == 'any' or (kind == 'null' and value is None):
+            return
+        if kind == 'callable':
+            if not callable(value):
+                raise TypeViolation(f'{path}: expected {self.name}, got {type(value).__name__}')
             return
         if kind in PRIMITIVE_KINDS and type(value) is self.python_type:
             return
@@ -251,6 +256,10 @@ class Compiler:
         if isinstance(node,ast.Subscript):
             base = self.lookup(node.value,names)
             nodes = node.slice.elts if isinstance(node.slice,ast.Tuple) else [node.slice]
+            if base in (typing.Callable, abc.Callable):
+                if len(nodes) != 2:
+                    raise UnsupportedType('Callable requires parameters and a return type')
+                return Contract('callable', ast.unparse(node))
             if (base is typing.Unpack and len(nodes) == 1 and isinstance(nodes[0], ast.Name)
                     and isinstance(names.get(nodes[0].id), typing.TypeVarTuple)):
                 return Contract('unpack_any', ast.unparse(node), python_type=names[nodes[0].id])
@@ -269,6 +278,8 @@ class Compiler:
 
     def generic(self,base,args,label,names):
         origin = typing.get_origin(base) or base
+        if origin is abc.Callable:
+            return Contract('callable',label)
         if origin in (typing.Union,types.UnionType):
             return Contract('union',label,args)
         if base is typing.Optional:
@@ -376,6 +387,8 @@ class Compiler:
         if isinstance(target,Contract): return target
         if target is None or target is type(None): return Contract('null','None')
         if target is typing.Any: return Contract('any','Any')
+        if target in (typing.Callable, abc.Callable):
+            return Contract('callable',str(target))
         if target in (typing.Final,typing.ClassVar):
             return Contract('qualifier',str(target),(Contract('any','Any'),),qualifier=target._name)
         if target in (typing.Never,typing.NoReturn): return Contract('never',str(target))

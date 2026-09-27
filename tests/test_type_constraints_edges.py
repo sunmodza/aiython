@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
-from typing import Any, Annotated, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeVar, TypeVarTuple, TypedDict, Unpack
+from typing import Any, Annotated, Callable, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeVar, TypeVarTuple, TypedDict, Unpack
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +14,15 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_callable_contract_checks_callable_without_claiming_signature(self):
+        for annotation in ('Callable[[int], str]', 'Callable[..., str]', 'Callable'):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, {'Callable': Callable})
+                self.assertTrue(contract.schema()['x-python-callable'])
+                contract.validate(str)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(3)
+
     def test_variadic_tuple_contract_keeps_fixed_members(self):
         parameters = {'Ts': TypeVarTuple('Ts'), 'Unpack': Unpack}
         for annotation in ('tuple[*Ts]', 'tuple[Unpack[Ts]]'):
@@ -223,7 +232,7 @@ class CompilerEdgeTests(unittest.TestCase):
     def test_compiler_rejects_unsafe_and_unresolved_annotations(self):
         cases = [
             'Missing', 'danger()', 'Unknown.attribute', 'Literal[1.5]',
-            'ReadOnly[int]', 'Callable[[int], str]', 'Self', 'LiteralString',
+            'ReadOnly[int]', 'Self', 'LiteralString',
             'list[int, str]', 'dict[str]', 'Generator[int, str]', 'type[int, str]',
         ]
         for source in cases:

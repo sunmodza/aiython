@@ -266,7 +266,7 @@ item = Item('bad')
     def test_unsupported_contract_fails_before_model_call(self):
         provider = Mock()
         with self.assertRaises(UnsupportedType):
-            self.run_source('from typing import Callable\nanswer: Callable[[int], str] = choose a function',ToolAgent(provider))
+            self.run_source('from typing import LiteralString\nanswer: LiteralString = choose a string',ToolAgent(provider))
         provider.complete.assert_not_called()
 
     def test_ai_expected_type_from_function_argument_and_generic_return(self):

@@ -1064,6 +1064,14 @@ def collect_qualified(*args: typing.Unpack[Ts]) -> tuple[*Ts]: return args
 def forward(*args: P.args, **kwargs: P.kwargs): return args, kwargs
 print(collect(1, 'x'), collect_qualified(2, 'y'), forward(1, x=2))
 ''',
+            'callable annotations': '''from typing import Callable
+from collections.abc import Callable as AbstractCallable
+def apply(fn: Callable[[int], str], value: int) -> str:
+    return fn(value)
+def invoke(fn: AbstractCallable):
+    return fn()
+print(apply(str, 3), invoke(lambda: 'ok'))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
