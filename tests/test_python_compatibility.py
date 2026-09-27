@@ -1156,6 +1156,16 @@ ordered: Reversible[str] = OrderedDict(x=1, y=2)
 numbers: Reversible[int] = deque([1, 2, 3])
 print('x' in keys, list(reversed(ordered)), list(reversed(numbers)))
 ''',
+            'bare abstract annotations': '''from contextlib import nullcontext
+from typing import ByteString, ContextManager, Generator, Iterable, Type
+items: Iterable = range(2)
+generator: Generator = (i for i in items)
+context: ContextManager = nullcontext(3)
+binary: ByteString = bytearray(b'xy')
+kind: Type = int
+with context as value:
+    print(list(generator), value, list(binary), kind('4'))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

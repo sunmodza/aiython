@@ -9,6 +9,7 @@ import ast
 import builtins
 import collections.abc as abc
 from collections import ChainMap, Counter, OrderedDict, defaultdict, deque
+import contextlib
 from dataclasses import dataclass, field
 import dataclasses
 import enum
@@ -384,6 +385,12 @@ class Compiler:
             return args[0]
         if origin is abc.Callable:
             return Contract('callable',label)
+        if not args and origin in (abc.ByteString, abc.Iterable, abc.Iterator,
+                                   abc.Generator, abc.AsyncIterable, abc.AsyncIterator,
+                                   abc.AsyncGenerator, abc.Awaitable, abc.Coroutine,
+                                   contextlib.AbstractContextManager,
+                                   contextlib.AbstractAsyncContextManager):
+            return Contract('abc', label, python_type=origin)
         if origin in (abc.Hashable, abc.Sized):
             if args:
                 raise UnsupportedType(f'{label}: this ABC does not take type arguments')
@@ -443,6 +450,8 @@ class Compiler:
             padded = args + (Contract('null','None'),)*(3-len(args))
             return Contract('async_generator' if async_kind else 'generator',label,padded)
         if origin is type:
+            if not args:
+                args = (Contract('any', 'Any'),)
             if len(args) != 1:
                 raise UnsupportedType('type requires one parameter')
             return Contract('type',label,args)

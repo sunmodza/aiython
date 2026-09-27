@@ -1,5 +1,7 @@
 import ast
+import asyncio
 from collections import ChainMap, Counter, OrderedDict, defaultdict, deque
+import contextlib
 from dataclasses import dataclass
 import enum
 import io
@@ -18,6 +20,45 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_bare_abstract_annotations_do_not_consume_values(self):
+        namespace = {'typing': typing}
+        iterator = (item for item in range(2))
+        for annotation in ('typing.Iterable', 'typing.Iterator', 'typing.Generator'):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                contract.validate(iterator)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(1)
+        self.assertEqual(next(iterator), 0)
+        iterator.close()
+
+        async def source():
+            yield 1
+
+        async def value():
+            return 1
+
+        async_iterator = source()
+        for annotation in ('typing.AsyncIterable', 'typing.AsyncIterator',
+                           'typing.AsyncGenerator'):
+            tc.compile_contract(annotation, namespace).validate(async_iterator)
+        coroutine = value()
+        for annotation in ('typing.Awaitable', 'typing.Coroutine'):
+            tc.compile_contract(annotation, namespace).validate(coroutine)
+        coroutine.close()
+        asyncio.run(async_iterator.aclose())
+
+        tc.compile_contract('typing.ContextManager', namespace).validate(
+            contextlib.nullcontext())
+        tc.compile_contract('typing.AsyncContextManager', namespace).validate(
+            contextlib.AsyncExitStack())
+        tc.compile_contract('typing.ByteString', namespace).validate(bytearray(b'abc'))
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('typing.ByteString', namespace).validate(memoryview(b'abc'))
+        tc.compile_contract('typing.Type', namespace).validate(int)
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('typing.Type', namespace).validate(1)
+
     def test_mapping_views_check_live_members(self):
         namespace = {'typing': typing}
         cases = (
