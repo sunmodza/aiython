@@ -32,7 +32,7 @@ Expected types reach direct AI expressions in annotated assignments, later assig
 
 ## Type forms
 
-Contracts support primitives, `None`, `Any`, unions/Optional, Literal values, Annotated descriptions, nested list/dict/set/frozenset/tuple, concrete Sequence/Mapping values, TypedDict with Required/NotRequired, dataclasses, nominal classes, Self, type parameters, TypeVar constraints, NewType's underlying runtime type, type[T], and recursive/generic type aliases on Python 3.12+. Generic class fields are checked after substituting supplied type arguments. `TypeGuard[T]` and `TypeIs[T]` returns are checked as booleans; their target type is for static narrowing.
+Contracts support primitives, `None`, `Any`, unions/Optional, Literal values, Annotated descriptions, nested list/dict/set/frozenset/tuple, `deque`, `defaultdict`, `OrderedDict`, `Counter`, concrete Sequence/Mapping values, TypedDict with Required/NotRequired, dataclasses, nominal classes, Self, type parameters, TypeVar constraints, NewType's underlying runtime type, type[T], and recursive/generic type aliases on Python 3.12+. Generic class fields are checked after substituting supplied type arguments. `TypeGuard[T]` and `TypeIs[T]` returns are checked as booleans; their target type is for static narrowing.
 
 Primitive checks are strict: no string-to-number conversion, and bool does not pass an int contract. `Any` is an explicit escape from value checking. Bare containers have unconstrained elements. `Final` bindings reject reassignment; `ClassVar` direct writes must target the class.
 

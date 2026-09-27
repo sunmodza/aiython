@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import builtins
 import collections.abc as abc
+from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 import dataclasses
 import enum
@@ -31,6 +32,13 @@ TYPE_ALIAS_TYPES = tuple({TypeAliasType, getattr(typing, "TypeAliasType", TypeAl
 READ_ONLY_TYPES = tuple({ReadOnly, getattr(typing, "ReadOnly", ReadOnly)})
 TYPE_NARROWING_TYPES = tuple({TypeGuard, TypeIs, typing.TypeGuard,
                               getattr(typing, 'TypeIs', TypeIs)})
+CONCRETE_SEQUENCE_TYPES = {'list':list, 'set':set, 'frozenset':frozenset,
+                           'deque':deque, 'tuple':tuple, 'tuple_many':tuple}
+CONCRETE_MAPPING_TYPES = {'dict':dict, 'mapping':dict, 'defaultdict':defaultdict,
+                          'ordered_dict':OrderedDict, 'counter':Counter}
+CONTAINER_KINDS = {list:'list', set:'set', frozenset:'frozenset', dict:'dict',
+                   deque:'deque', defaultdict:'defaultdict', OrderedDict:'ordered_dict',
+                   Counter:'counter', abc.Sequence:'sequence', abc.Mapping:'mapping'}
 
 
 class TypeViolation(CapabilityError, TypeError):
@@ -87,7 +95,7 @@ class Contract:
         elif kind == 'callable': result = {'x-python-callable': True}
         elif kind in ('str', 'int', 'float', 'bool'):
             result = {'type': {'str':'string', 'int':'integer', 'float':'number', 'bool':'boolean'}[kind]}
-        elif kind in ('list', 'set', 'frozenset', 'sequence'):
+        elif kind in ('list', 'set', 'frozenset', 'sequence', 'deque'):
             result = {'type': 'array', 'items': self.args[0].schema(seen)}
         elif kind == 'tuple':
             result = {'type': 'array', 'prefixItems': [a.schema(seen) for a in self.args],
@@ -98,7 +106,7 @@ class Contract:
                       'prefixItems': [item.schema(seen) for item in self.args[:pivot]],
                       'x-python-suffixItems': [item.schema(seen) for item in self.args[pivot + 1:]]}
         elif kind == 'tuple_many': result = {'type':'array', 'items':self.args[0].schema(seen)}
-        elif kind in ('dict', 'mapping'):
+        elif kind in ('dict', 'mapping', 'defaultdict', 'ordered_dict', 'counter'):
             result = {'type':'object', 'additionalProperties':self.args[1].schema(seen), 'x-key-schema':self.args[0].schema(seen)}
         elif kind == 'class' and isinstance(self.python_type,type) and issubclass(self.python_type,enum.Enum):
             values = [v.value for v in self.python_type]
@@ -155,8 +163,8 @@ class Contract:
             if value is not None: fail()
         elif kind in ('str','int','float','bool','bytes','complex'):
             if type(value) is not self.python_type: fail()
-        elif kind in ('list','set','frozenset','sequence','tuple_many','tuple'):
-            expected = {'list':list,'set':set,'frozenset':frozenset,'tuple':tuple,'tuple_many':tuple}.get(kind)
+        elif kind in ('list','set','frozenset','sequence','deque','tuple_many','tuple'):
+            expected = CONCRETE_SEQUENCE_TYPES.get(kind)
             if expected is not None and type(value) is not expected: fail()
             if kind == 'sequence' and type(value) not in (list,tuple,str,bytes,range):
                 fail('only non-consuming concrete sequences can be checked')
@@ -180,8 +188,9 @@ class Contract:
             for index, contract in enumerate(self.args[pivot + 1:]):
                 position = len(value) - suffix + index
                 child(contract, value[position], f'[{position}]')
-        elif kind in ('dict','mapping'):
-            if type(value) is not dict: fail('a concrete dict is required for deep checking')
+        elif kind in ('dict','mapping','defaultdict','ordered_dict','counter'):
+            expected = CONCRETE_MAPPING_TYPES[kind]
+            if type(value) is not expected: fail(f'a concrete {expected.__name__} is required for deep checking')
             for index, (key,item) in enumerate(value.items()):
                 child(self.args[0],key,f'.keys[{index}]')
                 child(self.args[1],item,f'[{key!r}]' if type(key) in (str,int) else f'.values[{index}]')
@@ -305,12 +314,13 @@ class Compiler:
             if len(args) != 1:
                 raise UnsupportedType('Qualifier requires one type')
             return Contract('qualifier',label,args,qualifier=base._name)
-        containers = {list:'list',set:'set',frozenset:'frozenset',dict:'dict',abc.Sequence:'sequence',abc.Mapping:'mapping'}
-        if origin in containers:
-            expected = 2 if origin in (dict,abc.Mapping) else 1
+        if origin in CONTAINER_KINDS:
+            expected = 2 if origin in (dict,abc.Mapping,defaultdict,OrderedDict) else 1
             if len(args) != expected:
                 raise UnsupportedType(f'{label}: wrong number of type parameters')
-            return Contract(containers[origin],label,args)
+            if origin is Counter:
+                args += (Contract('int','int',python_type=int),)
+            return Contract(CONTAINER_KINDS[origin],label,args)
         if origin is tuple:
             if len(args) == 2 and args[1] is Ellipsis: return Contract('tuple_many',label,args[:1])
             expanded = []

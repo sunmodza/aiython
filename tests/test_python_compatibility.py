@@ -1087,6 +1087,14 @@ numbers: Numbers = [1, 2]
 mapping: Forward = {'one': 1}
 print(numbers, mapping)
 ''',
+            'generic collections': '''from collections import Counter, OrderedDict, defaultdict, deque
+from typing import Deque, DefaultDict
+numbers: Deque[int] = deque([1, 2])
+mapping: DefaultDict[str, int] = defaultdict(int, {'x': 3})
+ordered: OrderedDict[str, int] = OrderedDict([('a', 4)])
+counts: Counter[str] = Counter({'a': 2})
+print(list(numbers), dict(mapping), list(ordered.items()), dict(counts))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

@@ -1,9 +1,10 @@
 import ast
-from collections import OrderedDict
+from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import enum
 from pathlib import Path
 import sys
+import typing
 import types
 from types import SimpleNamespace
 from typing import Any, Annotated, Callable, ClassVar, Final, Generic, Literal, NewType, Optional, Protocol, Required, Self, TypeGuard, TypeVar, TypeVarTuple, TypedDict, Unpack
@@ -15,6 +16,29 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_concrete_collections_preserve_generic_member_checks(self):
+        namespace = {'typing': typing, 'deque': deque, 'defaultdict': defaultdict,
+                     'OrderedDict': OrderedDict, 'Counter': Counter}
+        cases = (
+            ('deque[int]', deque([1]), deque(['wrong']), 'array'),
+            ('typing.Deque[int]', deque([1]), deque(['wrong']), 'array'),
+            ('defaultdict[str, int]', defaultdict(int, {'x': 1}),
+             defaultdict(int, {'x': 'wrong'}), 'object'),
+            ('typing.DefaultDict[str, int]', defaultdict(int, {'x': 1}),
+             defaultdict(int, {1: 2}), 'object'),
+            ('OrderedDict[str, int]', OrderedDict([('x', 1)]),
+             OrderedDict([('x', 'wrong')]), 'object'),
+            ('Counter[str]', Counter({'x': 2}), Counter({'x': 'wrong'}), 'object'),
+            ('typing.Counter[str]', Counter({'x': 2}), Counter({1: 2}), 'object'),
+        )
+        for annotation, valid, invalid, schema_type in cases:
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                self.assertEqual(contract.schema()['type'], schema_type)
+                contract.validate(valid)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(invalid)
+
     def test_type_alias_marker_allows_alias_declaration(self):
         marker = tc.compile_contract('TypeAlias', {'TypeAlias': TypeAlias})
         self.assertEqual(marker.kind, 'any')
