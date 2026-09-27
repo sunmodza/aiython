@@ -437,12 +437,17 @@ class Compiler:
                 arguments = typing.get_args(original)
                 if parameters and arguments:
                     compiled = []
+                    argument_scope = dict(current_scope)
+                    variadic = any(isinstance(parameter, typing.TypeVarTuple)
+                                   for parameter in parameters)
                     for arg in arguments:
-                        contract = self.compile(arg, current_scope)
-                        if contract.kind == 'unpack_fixed':
-                            compiled.extend(contract.args)
-                        else:
-                            compiled.append(contract)
+                        contract = self.compile(arg, argument_scope)
+                        members = contract.args if contract.kind == 'unpack_fixed' else (contract,)
+                        for member in members:
+                            position = len(compiled)
+                            compiled.append(member)
+                            if not variadic and position < len(parameters):
+                                argument_scope[parameters[position]] = member
                     base_scope.update(self.parameter_bindings(parameters, tuple(compiled), current_scope,
                                                               'Generic type argument count mismatch'))
                 else:
@@ -474,7 +479,7 @@ class Compiler:
         if target is None or target is type(None): return Contract('null','None')
         if target is typing.Any: return Contract('any','Any')
         if isinstance(target, typing.TypeVarTuple):
-            bound = names.get(target.__name__)
+            bound = names.get(target, names.get(target.__name__))
             return (Contract('unpack_fixed', target.__name__, bound)
                     if isinstance(bound, tuple) and all(isinstance(item, Contract) for item in bound)
                     else Contract('unpack_any', target.__name__, python_type=target))
@@ -492,7 +497,7 @@ class Compiler:
             raise UnsupportedType('LiteralString requires static provenance checking; use str for a runtime string contract')
         if isinstance(target,TYPE_ALIAS_TYPES): return self.alias(target,names)
         if isinstance(target,typing.TypeVar):
-            substituted = names.get(target.__name__)
+            substituted = names.get(target, names.get(target.__name__))
             if isinstance(substituted,Contract):
                 return substituted
             choices = target.__constraints__ or ((target.__bound__,) if target.__bound__ else ())

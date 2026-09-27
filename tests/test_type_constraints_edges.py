@@ -50,6 +50,31 @@ class ContractEdgeTests(unittest.TestCase):
             with self.subTest(value=value, other=other), self.assertRaises(tc.TypeViolation):
                 contract.validate(namespace['Child'](value, other))
 
+    @unittest.skipIf(sys.version_info < (3, 12), 'generic class syntax requires Python 3.12')
+    def test_inherited_parameters_with_matching_names_keep_their_identity(self):
+        namespace = {'__name__': __name__}
+        exec('class Base[T, U]:\n'
+             '    left: T\n'
+             '    right: U\n'
+             '    def __init__(self, left, right): self.left, self.right = left, right\n'
+             'class Child[T, U](Base[U, T]): pass\n', namespace)
+        contract = tc.compile_contract('Child[int, str]', namespace)
+        contract.validate(namespace['Child']('left', 1))
+        with self.assertRaises(tc.TypeViolation):
+            contract.validate(namespace['Child'](1, 'right'))
+
+    @unittest.skipIf(sys.version_info < (3, 13), 'type parameter defaults require Python 3.13')
+    def test_inherited_default_can_reference_earlier_base_parameter(self):
+        namespace = {'__name__': __name__}
+        exec('class Base[T, U = list[T]]:\n'
+             '    value: U\n'
+             '    def __init__(self, value): self.value = value\n'
+             'class Child(Base[int]): pass\n', namespace)
+        contract = tc.compile_contract('Child', namespace)
+        contract.validate(namespace['Child']([1]))
+        with self.assertRaises(tc.TypeViolation):
+            contract.validate(namespace['Child'](['wrong']))
+
     @unittest.skipIf(sys.version_info < (3, 12), 'variadic class syntax requires Python 3.12')
     def test_inherited_variadic_generic_fields_expand_arguments(self):
         namespace = {'__name__': __name__}
