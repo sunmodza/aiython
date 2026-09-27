@@ -87,6 +87,21 @@ def describe(**kwargs: Unpack[Options]) -> tuple[int, str | None]:
             with self.subTest(call=call), self.assertRaises(TypeViolation):
                 self.run_source(prelude + call + '\n')
 
+    def test_self_annotated_field_uses_instance_class(self):
+        prelude = '''from typing import Self
+class Node:
+    next: Self | None
+    def __init__(self):
+        self.next = None
+class Child(Node):
+    pass
+child = Child()
+'''
+        result = self.run_source(prelude + 'child.next = Child()\nanswer = isinstance(child.next, Child)\n')
+        self.assertTrue(result['answer'])
+        with self.assertRaises(TypeViolation):
+            self.run_source(prelude + 'child.next = Node()\n')
+
     @unittest.skipIf(sys.version_info < (3, 12), "The type statement requires Python 3.12")
     def test_forward_local_alias_is_captured(self):
         self.assertEqual(self.run_source('''def factory():

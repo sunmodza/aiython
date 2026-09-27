@@ -20,6 +20,25 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_self_field_uses_class_being_validated(self):
+        class Node:
+            next: Self | None
+
+        class Child(Node):
+            pass
+
+        parent = Node()
+        parent.next = Node()
+        child = Child()
+        child.next = Child()
+        tc.compile_contract(Node, {'Node': Node, 'Self': Self}).validate(parent)
+        child_contract = tc.compile_contract(Child, {'Node': Node, 'Child': Child,
+                                                     'Self': Self})
+        child_contract.validate(child)
+        child.next = Node()
+        with self.assertRaises(tc.TypeViolation):
+            child_contract.validate(child)
+
     def test_unpack_typed_dict_checks_keyword_mapping(self):
         class Options(TypedDict):
             count: int

@@ -1186,6 +1186,15 @@ def describe(**kwargs: Unpack[Options]) -> tuple[int, str | None]:
     return kwargs['count'], kwargs.get('label')
 print(describe(count=2), describe(count=3, label='ready'))
 ''',
+            'self annotated class fields': '''from typing import Self
+class Node:
+    next: Self | None
+    def __init__(self): self.next = None
+class Child(Node): pass
+head = Child()
+head.next = Child()
+print(type(head.next).__name__, head.next.next)
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

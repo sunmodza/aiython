@@ -30,6 +30,7 @@ except ModuleNotFoundError:  # Python 3.11–3.13
 from .capabilities import CapabilityError
 
 VALIDATORS = {}
+SELF_OWNER = object()
 PRIMITIVE_KINDS = frozenset(('str', 'int', 'float', 'bool', 'bytes', 'complex'))
 TYPE_ALIAS_TYPES = tuple({TypeAliasType, getattr(typing, "TypeAliasType", TypeAliasType)})
 READ_ONLY_TYPES = tuple({ReadOnly, getattr(typing, "ReadOnly", ReadOnly)})
@@ -587,7 +588,7 @@ class Compiler:
         result = Contract('typeddict' if record else 'class',label or target.__qualname__,python_type=target)
         self.cache[key] = result
         if target in VALIDATORS: return result
-        scope = self.module_names(target,names) | {target.__name__:target}
+        scope = self.module_names(target,names) | {target.__name__:target, SELF_OWNER:target}
         scope.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
         # isinstance can call a user's __getattribute__('__class__') here.
         scope.update({k:v for k,v in names.items()
@@ -673,7 +674,7 @@ class Compiler:
             return Contract('qualifier',str(target),(Contract('any','Any'),),qualifier=target._name)
         if target in (typing.Never,typing.NoReturn): return Contract('never',str(target))
         if target is typing.Self:
-            owner = names.get('self',names.get('cls'))
+            owner = names.get(SELF_OWNER, names.get('self',names.get('cls')))
             if owner is None:
                 raise UnsupportedType('Self requires an instance or class scope')
             return self.value(owner if isinstance(owner,type) else type(owner),names)

@@ -10,7 +10,8 @@ import typing
 import weakref
 
 from .frontend import RUNTIME_NAME
-from .type_constraints import Contract, ContractCache, TypeViolation, compile_contract, annotations_of, Compiler
+from .type_constraints import (Contract, ContractCache, TypeViolation, compile_contract,
+                               annotations_of, Compiler, SELF_OWNER)
 
 SCOPE = '__aiython_type_scope__'
 _FRAME_SCOPES = ContextVar('aiython_frame_scopes', default=())
@@ -348,6 +349,7 @@ class TypeRuntime:
                     fields.update(annotations_of(base))
                 source = fields.get(name)
                 namespace = Compiler.module_names(target,self.namespace(frame))
+                namespace[SELF_OWNER] = target
                 namespace.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
                 contract = compile_contract(source,namespace) if source else None
             if contract:
