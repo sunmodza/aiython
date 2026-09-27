@@ -1101,6 +1101,13 @@ pattern: Pattern[str] = re.compile('a+')
 match: Match[str] | None = pattern.search('aa')
 print(pattern.pattern, match.group() if match else None)
 ''',
+            'typed streams': '''import io
+from typing import IO, TextIO, BinaryIO
+text: IO[str] = io.StringIO('alpha')
+binary: BinaryIO = io.BytesIO(b'beta')
+def read_text(stream: TextIO) -> str: return stream.read()
+print(read_text(text), binary.read())
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

@@ -2,6 +2,7 @@ import ast
 from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import enum
+import io
 from pathlib import Path
 import re
 import sys
@@ -17,6 +18,24 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_io_annotations_use_standard_stream_classes(self):
+        text = io.StringIO('alpha')
+        binary = io.BytesIO(b'beta')
+        for annotation, valid, invalid, stream_type in (
+            ('typing.IO[str]', text, binary, 'str'),
+            ('typing.IO[bytes]', binary, text, 'bytes'),
+            ('typing.TextIO', text, binary, 'str'),
+            ('typing.BinaryIO', binary, text, 'bytes'),
+        ):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, {'typing': typing})
+                self.assertEqual(contract.schema()['x-python-io'], stream_type)
+                contract.validate(valid)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(invalid)
+        tc.compile_contract('typing.IO', {'typing': typing}).validate(text)
+        tc.compile_contract('typing.IO[Any]', {'typing': typing}).validate(binary)
+
     def test_regex_generic_annotations_check_input_type(self):
         namespace = {'re': re, 'typing': typing}
         cases = (

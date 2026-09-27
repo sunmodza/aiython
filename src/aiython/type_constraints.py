@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import dataclasses
 import enum
 from functools import lru_cache
+import io
 import inspect
 import re
 import sys
@@ -94,6 +95,8 @@ class Contract:
             if members: result['x-python-enum-members'] = members
         elif kind == 'null': result = {'type': 'null'}
         elif kind == 'callable': result = {'x-python-callable': True}
+        elif kind == 'io':
+            result = {'x-python-io': self.args[0].name}
         elif kind in ('pattern', 'match'):
             result = {'x-python-regex': kind, 'x-python-input-type': self.args[0].schema(seen)}
         elif kind in ('str', 'int', 'float', 'bool'):
@@ -162,6 +165,11 @@ class Contract:
             fail()
         elif kind == 'literal':
             if not any(type(value) is type(v) and value == v for v in self.args): fail('not an allowed literal')
+        elif kind == 'io':
+            target = self.args[0]
+            if not issubclass(type(value), io.IOBase): fail()
+            if target.kind == 'str' and not issubclass(type(value), io.TextIOBase): fail()
+            if target.kind == 'bytes' and not issubclass(type(value), (io.BufferedIOBase, io.RawIOBase)): fail()
         elif kind in ('pattern', 'match'):
             expected = re.Pattern if kind == 'pattern' else re.Match
             if type(value) is not expected: fail()
@@ -311,6 +319,10 @@ class Compiler:
             return args[0]
         if origin is abc.Callable:
             return Contract('callable',label)
+        if origin is typing.IO:
+            if len(args) != 1 or args[0].kind not in ('str', 'bytes', 'any'):
+                raise UnsupportedType('IO requires str, bytes, or Any as its stream type')
+            return Contract('io', label, args)
         if origin in (re.Pattern, re.Match):
             if len(args) > 1:
                 raise UnsupportedType('Regex type requires one input type')
@@ -507,6 +519,12 @@ class Compiler:
         if isinstance(target,Contract): return target
         if target is None or target is type(None): return Contract('null','None')
         if target is typing.Any: return Contract('any','Any')
+        if target is typing.IO or target is typing.TextIO or target is typing.BinaryIO:
+            stream_type = ('str' if target is typing.TextIO else
+                           'bytes' if target is typing.BinaryIO else 'any')
+            return Contract('io', target.__name__,
+                            (Contract(stream_type, stream_type,
+                                      python_type={'str':str, 'bytes':bytes}.get(stream_type)),))
         if target is typing.TypeAlias or target is TypeAlias:
             return Contract('any', 'TypeAlias')
         if isinstance(target, typing.TypeVarTuple):
