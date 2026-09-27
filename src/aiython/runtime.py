@@ -511,7 +511,7 @@ class AsyncCalls(ast.NodeTransformer):
         return node
 
 
-def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, cleanup=False):
+def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, scoped_retries=False):
     """Catch one statement without replaying statements before it."""
     target = None
     if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
@@ -525,9 +525,8 @@ def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, cleanup=
     runtime.checkpoints[key] = Checkpoint(unit, span, statement, target,
         ast.unparse(node.annotation) if isinstance(node, ast.AnnAssign) else None,
         retry_allowed)
-    if cleanup:
-        # Class __prepare__ mappings need not support deletion, so keep retry
-        # counts in the out-of-band class scope instead of their namespace.
+    if scoped_retries:
+        # Store retry counts in the type scope, away from user bindings.
         template = ast.parse(
             "while True:\n"
             "    try:\n"
@@ -581,7 +580,7 @@ class NestedCheckpoints(ast.NodeTransformer):
 
     def __init__(self, runtime, unit):
         self.runtime, self.unit, self.serial = runtime, unit, 0
-        self.in_class = False
+        self.scoped_retries = False
 
     @staticmethod
     def generated(node):
@@ -595,7 +594,7 @@ class NestedCheckpoints(ast.NodeTransformer):
             func = func.value
         return isinstance(func, ast.Name) and func.id == RUNTIME_NAME
 
-    def body(self, statements, *, nested=True, preserve_docstring=False, class_body=False):
+    def body(self, statements, *, nested=True, preserve_docstring=False, scoped_retries=False):
         result = []
         for index, node in enumerate(statements):
             node = self.visit(node)
@@ -605,7 +604,7 @@ class NestedCheckpoints(ast.NodeTransformer):
                     and not self.generated(node)):
                 self.serial += 1
                 key = f'{self.unit.filename}:nested-checkpoint:{self.serial}'
-                node = install_checkpoint(self.runtime, self.unit, node, key, cleanup=class_body)
+                node = install_checkpoint(self.runtime, self.unit, node, key, scoped_retries=scoped_retries)
             result.append(node)
         return result
 
@@ -614,24 +613,25 @@ class NestedCheckpoints(ast.NodeTransformer):
         return node
 
     def visit_FunctionDef(self, node):
-        previous = self.in_class
-        self.in_class = False
-        node.body = self.body(node.body, preserve_docstring=True)
-        self.in_class = previous
+        previous = self.scoped_retries
+        self.scoped_retries = True
+        node.body = self.body(node.body, preserve_docstring=True,
+                              scoped_retries=True)
+        self.scoped_retries = previous
         return node
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node):
-        previous = self.in_class
-        self.in_class = True
-        node.body = self.body(node.body, preserve_docstring=True, class_body=True)
-        self.in_class = previous
+        previous = self.scoped_retries
+        self.scoped_retries = True
+        node.body = self.body(node.body, preserve_docstring=True, scoped_retries=True)
+        self.scoped_retries = previous
         return node
 
     def visit_For(self, node):
-        node.body = self.body(node.body, class_body=self.in_class)
-        node.orelse = self.body(node.orelse, class_body=self.in_class)
+        node.body = self.body(node.body, scoped_retries=self.scoped_retries)
+        node.orelse = self.body(node.orelse, scoped_retries=self.scoped_retries)
         return node
 
     visit_AsyncFor = visit_For
@@ -640,14 +640,16 @@ class NestedCheckpoints(ast.NodeTransformer):
 
     def visit_Match(self, node):
         for case in node.cases:
-            case.body = self.body(case.body, class_body=self.in_class)
+            case.body = self.body(case.body, scoped_retries=self.scoped_retries)
         return node
 
     def visit_Try(self, node):
         # User try/except/finally and with managers must see exceptions first.
         # TypedTransformer's outer function guard is an implementation detail.
-        if getattr(node, '_aiython_type_guard', False) or getattr(node, '_aiython_class_guard', False):
-            node.body = self.body(node.body, class_body=self.in_class)
+        if getattr(node, '_aiython_module_guard', False):
+            node.body = self.body(node.body, nested=False)
+        elif getattr(node, '_aiython_type_guard', False) or getattr(node, '_aiython_class_guard', False):
+            node.body = self.body(node.body, scoped_retries=self.scoped_retries)
         return node
 
     visit_TryStar = visit_Try
@@ -802,26 +804,22 @@ class Runtime:
         tree = NestedCheckpoints(self, unit).visit(tree)
         ast.fix_missing_locations(tree)
         if entry:
-            body = []
-            for index, node in enumerate(tree.body):
-                from .typed_runtime import SCOPE
-                internal_scope = isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == SCOPE for t in node.targets)
-                internal_check = (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                                  and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == 'checkpoint')
-                if internal_scope or internal_check:
-                    body.append(node)
-                    continue
-                if (isinstance(node, ast.ImportFrom) and node.module == "__future__") or (
-                    index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, str)):
-                    body.append(node)
-                    continue
-                key = f"{unit.filename}:checkpoint:{index}"
-                retry_allowed = not isinstance(node, (ast.For, ast.AsyncFor, ast.While,
-                    ast.If, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match,
-                    ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-                body.append(install_checkpoint(self, unit, node, key, retry_allowed=retry_allowed))
-            tree.body = body
+            guard = next((node for node in tree.body if getattr(node, '_aiython_module_guard', False)), None)
+            if guard is not None:
+                body = []
+                for index, node in enumerate(guard.body):
+                    internal_check = (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                                      and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == 'checkpoint')
+                    if internal_check:
+                        body.append(node)
+                        continue
+                    key = f"{unit.filename}:checkpoint:{index}"
+                    retry_allowed = not isinstance(node, (ast.For, ast.AsyncFor, ast.While,
+                        ast.If, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match,
+                        ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                    body.append(install_checkpoint(self, unit, node, key, retry_allowed=retry_allowed,
+                                                   scoped_retries=True))
+                guard.body = body
         ast.fix_missing_locations(tree)
         return compile(tree, unit.filename, "exec", dont_inherit=True)
 
@@ -936,8 +934,8 @@ class Runtime:
         # keep theirs outside the metaclass's namespace.
         counts = None
         if attempt is None:
-            from .typed_runtime import SCOPE, Scope, class_scope
-            scope = class_scope(frame) or frame.f_locals.get(SCOPE)
+            from .typed_runtime import SCOPE, Scope, frame_scope
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             counts = (scope.recovery_counts if isinstance(scope, Scope) else
                       frame.f_locals.setdefault("__aiython_recovery_counts__", {}))
             attempt = counts.get(key, 0) + 1
@@ -987,9 +985,9 @@ class Runtime:
             del frame
 
     def clear_recovery_count(self, key):
-        from .typed_runtime import class_scope
+        from .typed_runtime import SCOPE, frame_scope
         frame = inspect.currentframe().f_back
         try:
-            class_scope(frame).recovery_counts.pop(key, None)
+            (frame_scope(frame) or frame.f_locals[SCOPE]).recovery_counts.pop(key, None)
         finally:
             del frame

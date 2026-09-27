@@ -12,11 +12,11 @@ from .frontend import RUNTIME_NAME
 from .type_constraints import Contract, ContractCache, TypeViolation, compile_contract, annotations_of, Compiler
 
 SCOPE = '__aiython_type_scope__'
-_CLASS_SCOPES = ContextVar('aiython_class_scopes', default=())
+_FRAME_SCOPES = ContextVar('aiython_frame_scopes', default=())
 
 
-def class_scope(frame):
-    return next((scope for active, scope in reversed(_CLASS_SCOPES.get())
+def frame_scope(frame):
+    return next((scope for active, scope in reversed(_FRAME_SCOPES.get())
                  if active is frame), None)
 
 
@@ -61,7 +61,7 @@ class TypeRuntime:
     @staticmethod
     def namespace(frame):
         namespace = dict(frame.f_globals) | dict(frame.f_locals)
-        scope = class_scope(frame) or frame.f_locals.get(SCOPE)
+        scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
         if isinstance(scope,Scope):
             namespace.update({parameter.__name__: bound for parameter,bound in scope.bindings.items()})
         return namespace
@@ -86,21 +86,21 @@ class TypeRuntime:
         finally:
             del frame
 
-    def enter_class_scope(self, declarations):
+    def enter_scope(self, declarations, parameters=None, returns=None):
         frame = inspect.currentframe().f_back
         try:
-            scope = self._initialize(frame, declarations, None, None)
-            _CLASS_SCOPES.set(_CLASS_SCOPES.get() + ((frame, scope),))
+            scope = self._initialize(frame, declarations, parameters, returns)
+            _FRAME_SCOPES.set(_FRAME_SCOPES.get() + ((frame, scope),))
         finally:
             del frame
 
-    def exit_class_scope(self):
-        stack = _CLASS_SCOPES.get()
-        _CLASS_SCOPES.set(stack[:-1])
+    def exit_scope(self):
+        stack = _FRAME_SCOPES.get()
+        _FRAME_SCOPES.set(stack[:-1])
 
     @staticmethod
     def scopes(frame):
-        local = class_scope(frame) or frame.f_locals.get(SCOPE)
+        local = frame_scope(frame) or frame.f_locals.get(SCOPE)
         global_scope = frame.f_globals.get(SCOPE)
         scopes = [(local,frame.f_locals)] if isinstance(local,Scope) else []
         if isinstance(global_scope,Scope) and global_scope is not local:
@@ -193,7 +193,7 @@ class TypeRuntime:
             # Active enclosing scopes can hold annotated aliases to mutated values.
             parent = frame.f_back
             while parent:
-                if (class_scope(parent) or SCOPE in parent.f_locals) and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME):
+                if (frame_scope(parent) or SCOPE in parent.f_locals) and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME):
                     self.check_frame(parent)
                 parent = parent.f_back
         finally: del frame
@@ -202,7 +202,7 @@ class TypeRuntime:
         frame = inspect.currentframe().f_back
         try:
             self.check_frame(frame)
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if isinstance(scope,Scope) and scope.returned:
                 contract = scope.returned.args[2] if scope.returned.kind in ('generator','async_generator') and frame.f_code.co_flags & (inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR) else scope.returned
                 contract.validate(value,'return',bindings=scope.bindings)
@@ -214,14 +214,14 @@ class TypeRuntime:
     def aborted(self):
         frame = inspect.currentframe().f_back
         try:
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if isinstance(scope,Scope): scope.failed = True
         finally: del frame
 
     def leaving(self):
         frame = inspect.currentframe().f_back
         try:
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if not isinstance(scope,Scope) or scope.failed:
                 return
             self.check_frame(frame)
@@ -234,7 +234,7 @@ class TypeRuntime:
         frame = inspect.currentframe().f_back
         try:
             self.check_frame(frame)
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if isinstance(scope,Scope) and scope.returned:
                 if scope.returned.kind not in ('generator','async_generator'):
                     raise TypeViolation('Generator return annotation must describe yielded values')
@@ -245,7 +245,7 @@ class TypeRuntime:
     def sent(self,value):
         frame = inspect.currentframe().f_back
         try:
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if isinstance(scope,Scope) and scope.returned:
                 scope.returned.args[1].validate(value,'send',bindings=scope.bindings)
             return value
@@ -253,7 +253,7 @@ class TypeRuntime:
 
     def delegate(self,iterable):
         frame = inspect.currentframe().f_back
-        scope = frame.f_locals.get(SCOPE)
+        scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
         del frame
         contract = scope.returned if isinstance(scope,Scope) else None
         iterator = iter(iterable)
@@ -323,7 +323,6 @@ class TypedTransformer(ast.NodeTransformer):
         self.snippet = snippet
         self.declarations = {}
         self.function = False
-        self.temp = 0
 
     @staticmethod
     def declarations_in(body):
@@ -336,7 +335,7 @@ class TypedTransformer(ast.NodeTransformer):
         for statement in body: collect(statement)
         return result
 
-    def body(self,body,*,parameters=None,returns=None,initialize=True,inherited=None,class_scope=False):
+    def body(self,body,*,parameters=None,returns=None,initialize=True,inherited=None,external_scope=False):
         previous = self.declarations
         self.declarations = dict(inherited or {}) | self.declarations_in(body)
         output = []
@@ -346,9 +345,10 @@ class TypedTransformer(ast.NodeTransformer):
         while body and isinstance(body[0],ast.ImportFrom) and body[0].module == '__future__':
             header.append(body[0]); body = body[1:]
         if initialize:
-            initial = (ast.Expr(helper('enter_class_scope',literal(self.declarations))) if class_scope else
+            initial = (ast.Expr(helper('enter_scope',literal(self.declarations),literal(parameters),literal(returns))) if external_scope else
                        ast.Assign([ast.Name(SCOPE,ast.Store())],helper('initialize',literal(self.declarations),literal(parameters),literal(returns))))
             ast.copy_location(initial,body[0] if body else header[-1] if header else ast.Constant(None,lineno=1,col_offset=0))
+            initial._aiython_scope_initializer = True
             output.append(initial)
         # Capture lexical types used only in stringified contracts without executing them.
         names = set()
@@ -367,7 +367,19 @@ class TypedTransformer(ast.NodeTransformer):
         return header+output
 
     def visit_Module(self,node):
-        node.body = self.body(node.body,initialize=not self.snippet)
+        if self.snippet:
+            node.body = self.body(node.body,initialize=False)
+            return node
+        body = self.body(node.body,external_scope=True)
+        initial = next(i for i,item in enumerate(body) if getattr(item,'_aiython_scope_initializer',False))
+        header, enter, statements = body[:initial], body[initial], body[initial+1:]
+        exit_call = ast.copy_location(ast.Expr(helper('exit_scope')), enter)
+        if statements:
+            guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), enter)
+            guard._aiython_module_guard = True
+            node.body = header + [enter, guard]
+        else:
+            node.body = header + [enter, exit_call]
         return node
 
     def visit_FunctionDef(self,node):
@@ -382,19 +394,24 @@ class TypedTransformer(ast.NodeTransformer):
         returns = ast.unparse(node.returns) if node.returns else None
         # Generator annotations require yield/send checks, not return-only checks.
         is_generator = any(isinstance(n,(ast.Yield,ast.YieldFrom)) for n in self.function_nodes(node))
+        external_scope = not is_generator
         used = {n.id for n in self.function_nodes(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Load)}
         nonlocal_names = {name for n in self.function_nodes(node) if isinstance(n,ast.Nonlocal) for name in n.names}
         assigned = {n.id for n in self.function_nodes(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store)} - nonlocal_names
         inherited = {name:source for name,source in parent_declarations.items() if name in (used|nonlocal_names) and name not in assigned and name not in parameters}
-        node.body = self.body(node.body,parameters=parameters,returns=returns,inherited=inherited)
+        node.body = self.body(node.body,parameters=parameters,returns=returns,
+                              inherited=inherited,external_scope=external_scope)
         if isinstance(node,ast.AsyncFunctionDef) and is_generator:
             node.body.append(ast.copy_location(ast.Expr(helper('returned',ast.Constant(None))),node))
         else:
             node.body.append(ast.copy_location(ast.Return(helper('returned',ast.Constant(None))),node))
-        initial = next(i for i,n in enumerate(node.body) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id == SCOPE for t in n.targets))
+        initial = next(i for i,n in enumerate(node.body) if getattr(n,'_aiython_scope_initializer',False))
         handler = ast.ExceptHandler(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'error_type',ast.Load()),None,
                                     [ast.Expr(helper('aborted')),ast.Raise()])
-        guarded = ast.Try(node.body[initial+1:],[handler],[],[ast.Expr(helper('leaving'))])
+        final = ast.Expr(helper('leaving'))
+        if external_scope:
+            final = ast.Try([final],[],[],[ast.Expr(helper('exit_scope'))])
+        guarded = ast.Try(node.body[initial+1:],[handler],[],[final])
         guarded._aiython_type_guard = True
         ast.copy_location(guarded,node)
         node.body = node.body[:initial+1] + [guarded]
@@ -414,10 +431,10 @@ class TypedTransformer(ast.NodeTransformer):
         node.decorator_list.insert(0, ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),'register_class',ast.Load()))
         previous = self.function
         self.function = False
-        body = self.body(node.body,class_scope=True)
+        body = self.body(node.body,external_scope=True)
         header = body[:1] if isinstance(body[0],ast.Expr) and isinstance(body[0].value,ast.Constant) and isinstance(body[0].value.value,str) else []
         enter, *statements = body[len(header):]
-        exit_call = ast.copy_location(ast.Expr(helper('exit_class_scope')), node)
+        exit_call = ast.copy_location(ast.Expr(helper('exit_scope')), node)
         guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), node)
         guard._aiython_class_guard = True
         node.body = header + [enter, guard]
@@ -452,12 +469,14 @@ class TypedTransformer(ast.NodeTransformer):
         node.value = self.visit(node.value)
         if len(node.targets) == 1 and isinstance(node.targets[0],ast.Attribute):
             target = node.targets[0]
-            self.temp += 1
-            temporary = f'__aiython_typed_value_{self.temp}'
-            store = ast.copy_location(ast.Assign([ast.Name(temporary,ast.Store())],node.value),node)
-            assign = ast.copy_location(ast.Expr(helper('assign_attribute',self.visit(target.value),ast.Constant(target.attr),ast.Name(temporary,ast.Load()))),node)
-            clean = ast.copy_location(ast.Delete([ast.Name(temporary,ast.Del())]),node)
-            return [store,assign,clean]
+            assign = ast.Call(
+                ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),
+                              'assign_attribute',ast.Load()), [], [
+                    ast.keyword(arg='value',value=node.value),
+                    ast.keyword(arg='owner',value=self.visit(target.value)),
+                    ast.keyword(arg='name',value=ast.Constant(target.attr)),
+                ])
+            return ast.copy_location(ast.Expr(assign),node)
         for target in node.targets:
             if isinstance(target,ast.Name) and not target.id.startswith('__aiython_'):
                 node.value = helper('assignment',node.value,ast.Constant(target.id))

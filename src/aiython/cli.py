@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import importlib.abc
 import importlib.machinery
 import importlib.metadata
@@ -59,16 +60,22 @@ class ProjectFinder(importlib.abc.MetaPathFinder):
 def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, stats=False, trace_plan=False,
                config_path=None, profile=None, force_profile=None):
     started = perf_counter()
+    argv0 = str(path)
+    display_path = path.absolute()
     path = path.resolve()
     config = config or resolve(path, config_path=config_path, profile=profile, force_profile=force_profile)
     config_seconds = perf_counter() - started
     runtime = Runtime(config, agent_factory=agent_factory, stats=stats, trace_plan=trace_plan)
-    code = runtime.compile_source(read_source(path), str(path), entry=True)
+    code = runtime.compile_source(read_source(path), str(display_path), entry=True)
     module = types.ModuleType("__main__")
-    module.__dict__.update({"__file__": str(path), "__package__": None,
+    module.__dict__.update({"__file__": str(display_path), "__package__": None,
                             "__spec__": None,
-                            "__cached__": None, RUNTIME_NAME: runtime,
-                            "__builtins__": __builtins__})
+                            "__cached__": None,
+                            "__loader__": importlib.machinery.SourceFileLoader("__main__", str(display_path)),
+                            RUNTIME_NAME: runtime,
+                            "__builtins__": builtins})
+    if sys.version_info < (3, 14):
+        module.__annotations__ = {}
     old_main = sys.modules.get("__main__")
     old_argv, old_path = sys.argv, sys.path[:]
     old_spawn_entry = os.environ.get("AIYTHON_SPAWN_ENTRY")
@@ -76,10 +83,10 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     execution_started = None
     try:
         sys.modules["__main__"] = module
-        sys.argv = [str(path), *arguments]
+        sys.argv = [argv0, *arguments]
         sys.path.insert(0, str(path.parent))
         sys.meta_path.insert(0, finder)
-        os.environ["AIYTHON_SPAWN_ENTRY"] = str(path)
+        os.environ["AIYTHON_SPAWN_ENTRY"] = str(display_path)
         execution_started = perf_counter()
         exec(code, module.__dict__)
         return module.__dict__
