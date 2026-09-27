@@ -394,7 +394,7 @@ class Compiler:
             if base in (typing.Callable, abc.Callable):
                 if len(nodes) != 2:
                     raise UnsupportedType('Callable requires parameters and a return type')
-                return Contract('callable', ast.unparse(node))
+                return Contract('callable', ast.unparse(node), python_type=abc.Callable)
             if (base is typing.Unpack and len(nodes) == 1 and isinstance(nodes[0], ast.Name)
                     and isinstance(names.get(nodes[0].id), typing.TypeVarTuple)):
                 return Contract('unpack_any', ast.unparse(node), python_type=names[nodes[0].id])
@@ -424,7 +424,7 @@ class Compiler:
         if origin is typing.Unpack and len(args) == 1 and args[0].kind in ('unpack_any', 'unpack_fixed'):
             return args[0]
         if origin is abc.Callable:
-            return Contract('callable',label)
+            return Contract('callable',label,python_type=abc.Callable)
         if not args and origin in (abc.ByteString, abc.Iterable, abc.Iterator,
                                    abc.Generator, abc.AsyncIterable, abc.AsyncIterator,
                                    abc.AsyncGenerator, abc.Awaitable, abc.Coroutine,
@@ -443,7 +443,7 @@ class Compiler:
             if len(args) > 1:
                 raise UnsupportedType('Regex type requires one input type')
             return Contract('pattern' if origin is re.Pattern else 'match', label,
-                            args or (Contract('any', 'Any'),))
+                            args or (Contract('any', 'Any'),), python_type=origin)
         if origin in (typing.Union,types.UnionType):
             return Contract('union',label,args)
         if base is typing.Optional:
@@ -464,9 +464,10 @@ class Compiler:
                 raise UnsupportedType(f'{label}: wrong number of type parameters')
             if origin is Counter:
                 args += (Contract('int','int',python_type=int),)
-            return Contract(CONTAINER_KINDS[origin],label,args)
+            return Contract(CONTAINER_KINDS[origin],label,args,python_type=origin)
         if origin is tuple:
-            if len(args) == 2 and args[1] is Ellipsis: return Contract('tuple_many',label,args[:1])
+            if len(args) == 2 and args[1] is Ellipsis:
+                return Contract('tuple_many',label,args[:1],python_type=tuple)
             expanded = []
             for arg in args:
                 if isinstance(arg, Contract) and arg.kind == 'unpack_fixed':
@@ -477,24 +478,26 @@ class Compiler:
             unpacked = [index for index, arg in enumerate(args)
                         if isinstance(arg, Contract) and arg.kind == 'unpack_any']
             if len(unpacked) == 1:
-                if len(args) == 1: return Contract('tuple_many',label,(Contract('any','Any'),))
-                return Contract('tuple_unpacked',label,args)
+                if len(args) == 1:
+                    return Contract('tuple_many',label,(Contract('any','Any'),),python_type=tuple)
+                return Contract('tuple_unpacked',label,args,python_type=tuple)
             if unpacked:
                 raise UnsupportedType('Only one variadic tuple parameter can be checked')
-            return Contract('tuple',label,args)
+            return Contract('tuple',label,args,python_type=tuple)
         if origin in (abc.Generator,abc.Iterator,abc.Iterable,abc.AsyncGenerator,abc.AsyncIterator,abc.AsyncIterable):
             async_kind = origin in (abc.AsyncGenerator,abc.AsyncIterator,abc.AsyncIterable)
             expected = 3 if origin is abc.Generator else 2 if origin is abc.AsyncGenerator else 1
             if len(args) != expected:
                 raise UnsupportedType('Wrong iterator type argument count')
             padded = args + (Contract('null','None'),)*(3-len(args))
-            return Contract('async_generator' if async_kind else 'generator',label,padded)
+            return Contract('async_generator' if async_kind else 'generator',label,padded,
+                            python_type=origin)
         if origin is type:
             if not args:
                 args = (Contract('any', 'Any'),)
             if len(args) != 1:
                 raise UnsupportedType('type requires one parameter')
-            return Contract('type',label,args)
+            return Contract('type',label,args,python_type=type)
         if isinstance(base,TYPE_ALIAS_TYPES): return self.alias(base,names,args,label)
         if isinstance(base,type) and (getattr(base,'__type_params__',()) or getattr(base,'__parameters__',())):
             parameters = getattr(base,'__type_params__',()) or base.__parameters__
@@ -641,7 +644,8 @@ class Compiler:
         if target is None or target is type(None): return Contract('null','None')
         if target is typing.Any: return Contract('any','Any')
         if target is typing.Tuple:
-            return Contract('tuple_many', 'typing.Tuple', (Contract('any', 'Any'),))
+            return Contract('tuple_many', 'typing.Tuple', (Contract('any', 'Any'),),
+                            python_type=tuple)
         if target is typing.IO or target is typing.TextIO or target is typing.BinaryIO:
             stream_type = ('str' if target is typing.TextIO else
                            'bytes' if target is typing.BinaryIO else 'any')
@@ -656,7 +660,7 @@ class Compiler:
                     if isinstance(bound, tuple) and all(isinstance(item, Contract) for item in bound)
                     else Contract('unpack_any', target.__name__, python_type=target))
         if target in (typing.Callable, abc.Callable):
-            return Contract('callable',str(target))
+            return Contract('callable',str(target),python_type=abc.Callable)
         if target in (typing.Final,typing.ClassVar):
             return Contract('qualifier',str(target),(Contract('any','Any'),),qualifier=target._name)
         if target in (typing.Never,typing.NoReturn): return Contract('never',str(target))
@@ -688,7 +692,7 @@ class Compiler:
         if target in (int,str,float,bool,bytes,complex): return Contract(target.__name__,target.__name__,python_type=target)
         if target in (list,set,frozenset,dict,tuple):
             any_type = Contract('any','Any')
-            if target is tuple: return Contract('tuple_many','tuple',(any_type,))
+            if target is tuple: return Contract('tuple_many','tuple',(any_type,),python_type=tuple)
             return self.generic(target,(any_type,any_type) if target is dict else (any_type,),target.__name__,names)
         if not isinstance(target,type):
             raise UnsupportedType('Annotation is not a supported Python type')

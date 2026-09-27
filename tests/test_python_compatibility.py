@@ -1166,14 +1166,17 @@ kind: Type = int
 with context as value:
     print(list(generator), value, list(binary), kind('4'))
 ''',
-            'union class annotations': '''from typing import Annotated, TypeVar
+            'union class annotations': '''from typing import Annotated, Sequence, TypeVar
 T = TypeVar('T', int, str)
 def same(kind: type[T], value: T) -> T:
     return value
 one: type[int | str] = int
 none_type: type[None] = type(None)
 annotated: type[Annotated[int, 'number']] = int
-print(one('2'), none_type(), annotated('3'), same(str, 'four'))
+concrete: type[list[int]] = list
+abstract: type[Sequence[int]] = list
+print(one('2'), none_type(), annotated('3'), same(str, 'four'),
+      concrete([1, 2]), abstract([3]))
 ''',
         }
         if sys.version_info >= (3, 12):

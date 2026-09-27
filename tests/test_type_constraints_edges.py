@@ -478,9 +478,18 @@ class ContractEdgeTests(unittest.TestCase):
             ('typing.Type[typing.Union[int, str]]', str, float),
             ('type[None]', type(None), int),
             ('type[typing.Annotated[int, "metadata"]]', int, str),
+            ('type[list[int]]', list, dict),
+            ('type[dict[str, int]]', dict, list),
+            ('type[tuple[int, ...]]', tuple, list),
+            ('type[typing.Sequence[int]]', list, dict),
+            ('type[typing.Mapping[str, int]]', OrderedDict, list),
+            ('type[typing.Iterator[int]]', type(iter([])), list),
+            ('type[typing.Callable[[int], str]]', type(lambda: None), list),
+            ('type[re.Pattern[str]]', re.Pattern, str),
+            ('type[type[int]]', type, int),
         ):
             with self.subTest(annotation=annotation):
-                contract = tc.compile_contract(annotation, namespace)
+                contract = tc.compile_contract(annotation, namespace | {'re': re})
                 contract.validate(valid)
                 with self.assertRaises(tc.TypeViolation):
                     contract.validate(invalid)
