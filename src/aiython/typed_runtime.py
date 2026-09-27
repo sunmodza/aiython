@@ -78,6 +78,7 @@ class TypeRuntime:
         self.manager = manager
         self.classes = weakref.WeakSet()
         self.method_owners = weakref.WeakKeyDictionary()
+        self.function_type_params = weakref.WeakKeyDictionary()
         self._classes_lock = threading.RLock()
         self._contract_cache = threading.local()
         self._active_instance_checks = ContextVar('aiython_active_instance_checks', default=frozenset())
@@ -203,7 +204,25 @@ class TypeRuntime:
                 visited.add(id(method))
                 owners = self.method_owners.setdefault(method.__code__, weakref.WeakSet())
                 owners.add(cls)
+                parameters = getattr(method, '__type_params__', ())
+                if parameters:
+                    self.function_type_params[method.__code__] = parameters
                 method = vars(method).get('__wrapped__')
+
+    def register_function(self, function):
+        if isinstance(function, (classmethod, staticmethod)):
+            method = function.__func__
+        else:
+            method = function
+        visited = set()
+        with self._classes_lock:
+            while type(method) is types.FunctionType and id(method) not in visited:
+                visited.add(id(method))
+                parameters = getattr(method, '__type_params__', ())
+                if parameters:
+                    self.function_type_params[method.__code__] = parameters
+                method = vars(method).get('__wrapped__')
+        return function
 
     def method_self_owner(self, frame, *, discover=False):
         with self._classes_lock:
@@ -224,8 +243,7 @@ class TypeRuntime:
             return candidate
         return owners[0] if len(owners) == 1 else None
 
-    @staticmethod
-    def namespace(frame):
+    def namespace(self, frame):
         namespace = dict(frame.f_globals)
         if frame.f_code.co_name != '<module>' and not frame.f_code.co_flags & inspect.CO_OPTIMIZED:
             parents = []
@@ -238,6 +256,19 @@ class TypeRuntime:
             for local in reversed(parents):
                 namespace.update(local)
         namespace.update(frame.f_locals)
+        with self._classes_lock:
+            parameters = self.function_type_params.get(frame.f_code, ())
+            owners = tuple(self.method_owners.get(frame.f_code, ()))
+        namespace.update({parameter.__name__: parameter for parameter in parameters})
+        generic_owners = tuple(owner for owner in owners if class_parameters(owner))
+        if generic_owners:
+            owner = self.method_self_owner(frame) or (
+                generic_owners[0] if len(generic_owners) == 1 else None)
+            if owner is not None:
+                for parameter in class_parameters(owner):
+                    namespace[parameter.__name__] = parameter
+                    if parameter.__name__.startswith('__') and not parameter.__name__.endswith('__'):
+                        namespace[f'_{owner.__name__.lstrip("_")}{parameter.__name__}'] = parameter
         scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
         if isinstance(scope,Scope):
             namespace.update({parameter.__name__: bound for parameter,bound in scope.bindings.items()})
@@ -385,9 +416,20 @@ class TypeRuntime:
             for item in candidate.values():
                 self._check_instances(item, classes, seen, frame)
 
+    @staticmethod
+    def _has_class_annotations(cls):
+        # Keep unannotated project classes out of the per-statement scan.
+        # Inspect this at each checkpoint so annotations added later still count.
+        for base in cls.__mro__:
+            members = vars(base)
+            if (members.get('__annotations__') or members.get('__annotations_cache__')
+                    or members.get('__annotate_func__') or '__annotate__' in members):
+                return True
+        return False
+
     def check_frame(self,frame):
         with self._classes_lock:
-            classes = frozenset(self.classes)
+            classes = frozenset(cls for cls in self.classes if self._has_class_annotations(cls))
         if classes:
             seen = set()
             if 'self' in frame.f_locals:
@@ -634,6 +676,11 @@ class TypedTransformer(ast.NodeTransformer):
         return node
 
     def visit_FunctionDef(self,node):
+        if getattr(node, 'type_params', ()):
+            last = node.decorator_list[-1] if node.decorator_list else node
+            register = ast.Attribute(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'types',ast.Load()),
+                                     'register_function',ast.Load())
+            node.decorator_list.append(ast.copy_location(register, last))
         previous = self.function
         previous_contract = self.delegation_contract
         parent_declarations = dict(self.declarations) if previous else {}

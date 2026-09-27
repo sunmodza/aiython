@@ -501,7 +501,16 @@ class Compiler:
                 if len(nodes) != 1:
                     raise UnsupportedType('Type narrowing requires one target type')
                 return Contract('bool',ast.unparse(node),python_type=bool)
-            args = tuple(Ellipsis if isinstance(n,ast.Constant) and n.value is Ellipsis else self.node(n,names) for n in nodes)
+            accepts_parameter_list = (typing.get_origin(base) or base) is abc.Callable or (
+                isinstance(typing.get_origin(base) or base, type) and
+                any(isinstance(parameter, typing.ParamSpec)
+                    for parameter in class_parameters(typing.get_origin(base) or base)))
+            args = tuple(
+                Ellipsis if isinstance(n,ast.Constant) and n.value is Ellipsis else
+                Contract('param_spec_args', ast.unparse(n),
+                         tuple(self.node(item,names) for item in n.elts))
+                if isinstance(n, ast.List) and accepts_parameter_list else self.node(n,names)
+                for n in nodes)
             return self.generic(base,args,ast.unparse(node),names)
         return self.value(self.lookup(node,names),names)
 
@@ -802,7 +811,17 @@ class Compiler:
         if origin in TYPE_NARROWING_TYPES:
             return Contract('bool',str(target),python_type=bool)
         if origin is not None:
-            return self.generic(origin,tuple(Ellipsis if a is Ellipsis else self.compile(a,names) for a in args),str(target),names)
+            accepts_parameter_list = origin is abc.Callable or (
+                isinstance(origin, type) and
+                any(isinstance(parameter, typing.ParamSpec)
+                    for parameter in class_parameters(origin)))
+            compiled = tuple(
+                Ellipsis if arg is Ellipsis else
+                Contract('param_spec_args', str(arg),
+                         tuple(self.compile(item,names) for item in arg))
+                if isinstance(arg, (list, tuple)) and accepts_parameter_list else self.compile(arg,names)
+                for arg in args)
+            return self.generic(origin,compiled,str(target),names)
         if target in (int,str,float,bool,bytes,complex): return Contract(target.__name__,target.__name__,python_type=target)
         if target in (list,set,frozenset,dict,tuple):
             any_type = Contract('any','Any')

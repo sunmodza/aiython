@@ -54,6 +54,15 @@ answer = person.age
 ''')
         self.assertEqual(result['answer'],10)
 
+    def test_annotations_added_after_class_creation_are_checked(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box: pass
+box = Box()
+box.value = 'wrong'
+Box.__annotations__ = {'value': int}
+answer = 1
+''')
+
     def test_function_attribute_annotation_checks_after_target_lookup(self):
         with self.assertRaises(TypeViolation):
             self.run_source('''class Box:
@@ -493,3 +502,14 @@ box = Box[int]('wrong')
 answer = identity(3)
 ''')
         self.assertEqual(result['answer'],3)
+        with self.assertRaises(TypeViolation):
+            self.run_source('''def broken[T](value: T) -> T:
+    return 'wrong'
+broken(1)
+''')
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box[__T]:
+    def broken[__U](self, left: __T, right: __U) -> __U:
+        return left
+Box[int]().broken(1, 'expected a string')
+''')

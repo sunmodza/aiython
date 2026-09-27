@@ -1543,6 +1543,24 @@ print(type(Child().clone()).__name__, type(Child.create()).__name__)
 ''',
         }
         if sys.version_info >= (3, 12):
+            cases['generic function and mangled method parameters'] = '''def identity[T](value: T) -> T: return value
+def decorate(function):
+    def wrapper(*args, **kwargs): return function(*args, **kwargs)
+    return wrapper
+@decorate
+def wrapped[T](value: T) -> T: return value
+class Box[__T]:
+    def pair[__U](self, left: __T, right: __U):
+        return (__T, __U, left, right)
+box = Box()
+first, second, left, right = box.pair(1, 'x')
+print(identity(3), wrapped(4), first is Box.__type_params__[0],
+      second is Box.pair.__type_params__[0], left, right)
+'''
+            cases['variadic generic class with parameter list'] = '''class Shape[X, *Y, **Z]: pass
+shape = Shape[int, str, bytes, [float, object]]()
+print(type(shape).__name__, shape.__orig_class__.__args__[-1])
+'''
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
 def mixed[*Ts](first: int, *args: *Ts) -> tuple[int, *Ts, str]:
     return (first, *args, 'done')
