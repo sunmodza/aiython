@@ -660,6 +660,23 @@ def run():
 run()
 print(events)
 ''',
+            'custom attribute access during assignment': '''events = []
+class Item:
+    def __iadd__(self, other):
+        events.append(('iadd', other))
+        return self
+class Box:
+    def __init__(self): self.value = Item()
+    def __getattribute__(self, name):
+        events.append(('get', name))
+        return object.__getattribute__(self, name)
+    def __setattr__(self, name, value):
+        events.append(('set', name))
+        object.__setattr__(self, name, value)
+box = Box()
+box.value += 1
+print(events)
+''',
             'async function locals': '''import asyncio
 async def run(value):
     result = value + 1

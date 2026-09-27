@@ -25,6 +25,14 @@ def frame_scope(frame):
         return _GENERATOR_SCOPES.get(id(frame))
 
 
+def original_class(value):
+    # Bypass user __getattribute__ while reading typing's instance metadata.
+    try:
+        return object.__getattribute__(value, '__orig_class__')
+    except AttributeError:
+        return type(value)
+
+
 @dataclass
 class Scope:
     declarations: dict = field(default_factory=dict)
@@ -145,7 +153,7 @@ class TypeRuntime:
         with self._classes_lock:
             registered = type(value) in self.classes
         if registered:
-            compile_contract(getattr(value,'__orig_class__',type(value)),self.namespace(frame)).validate(value,name)
+            compile_contract(original_class(value),self.namespace(frame)).validate(value,name)
         return value
 
     def assignment(self,value,name,annotation=None):
@@ -181,7 +189,7 @@ class TypeRuntime:
                 seen.add(id(candidate))
                 cls = type(candidate)
                 if cls in classes:
-                    compile_contract(getattr(candidate,'__orig_class__',cls),self.namespace(frame)).validate(candidate,cls.__qualname__)
+                    compile_contract(original_class(candidate),self.namespace(frame)).validate(candidate,cls.__qualname__)
                     try: state = object.__getattribute__(candidate,'__dict__')
                     except AttributeError: state = {}
                     check_instances(state)
@@ -305,7 +313,7 @@ class TypeRuntime:
             if annotation:
                 contract = compile_contract(annotation,self.namespace(frame))
             else:
-                target = owner if isinstance(owner,type) else type(owner)
+                target = owner if issubclass(type(owner), type) else type(owner)
                 fields = {}
                 for base in reversed(target.__mro__):
                     fields.update(annotations_of(base))
@@ -314,7 +322,7 @@ class TypeRuntime:
                 namespace.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
                 contract = compile_contract(source,namespace) if source else None
             if contract:
-                if contract.marker == 'ClassVar' and not isinstance(owner,type):
+                if contract.marker == 'ClassVar' and not issubclass(type(owner), type):
                     raise TypeViolation(f'{name}: ClassVar must be assigned on the class')
                 if contract.marker == 'Final':
                     try: inspect.getattr_static(owner,name)

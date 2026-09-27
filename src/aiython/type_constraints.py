@@ -321,7 +321,8 @@ class Compiler:
         if target in VALIDATORS: return result
         scope = self.module_names(target,names) | {target.__name__:target}
         scope.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
-        scope.update({k:v for k,v in names.items() if isinstance(v,Contract)})
+        # isinstance can call a user's __getattribute__('__class__') here.
+        scope.update({k:v for k,v in names.items() if issubclass(type(v), Contract)})
         fields = {}
         for base in reversed(target.__mro__):
             if base in (object,dict): continue
