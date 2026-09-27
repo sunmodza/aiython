@@ -578,6 +578,26 @@ class ContractEdgeTests(unittest.TestCase):
         with self.assertRaisesRegex(tc.UnsupportedType, 'annotation calls are not executed'):
             tc.compile_contract('type(None)', {'type': lambda value: value})
 
+    def test_class_local_annotation_aliases_override_caller_names(self):
+        class Item:
+            Element = int
+            value: 'Element'
+
+        class Child(Item):
+            pass
+
+        for cls in (Item, Child):
+            with self.subTest(cls=cls):
+                contract = tc.compile_contract(cls, {'Element': str})
+                good = cls()
+                good.value = 2
+                contract.validate(good)
+                bad = cls()
+                bad.value = 'wrong'
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(bad)
+        self.assertEqual(tc.compile_contract(tc.dataclasses.InitVar, {}).kind, 'initvar')
+
     def test_class_custom_validator_and_missing_field(self):
         class Choice:
             value: int

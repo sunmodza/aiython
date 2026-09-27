@@ -1026,6 +1026,20 @@ class Item:
     value: Union[int, type(None)] = None
 print(Item.__doc__, Item().value)
 ''',
+            'dataclass class local markers': '''from dataclasses import dataclass, InitVar
+from typing import ClassVar
+@dataclass
+class Item:
+    ClassMarker = ClassVar
+    InitMarker = InitVar
+    marker: ClassMarker = 1
+    input: InitMarker
+    value: int = 0
+    def __post_init__(self, input):
+        self.value = input
+item = Item(2)
+print(item.marker, item.value, 'input' in vars(item))
+''',
             'dataclass without generated init': '''from dataclasses import dataclass
 @dataclass(slots=True, init=False)
 class Point:

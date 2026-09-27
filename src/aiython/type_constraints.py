@@ -644,7 +644,9 @@ class Compiler:
         result = Contract('typeddict' if record else 'class',label or target.__qualname__,python_type=target)
         self.cache[key] = result
         if target in VALIDATORS: return result
-        scope = self.module_names(target,names) | {target.__name__:target, SELF_OWNER:target}
+        scope = (self.module_names(target,names) |
+                 dict(type.__getattribute__(target, '__dict__')) |
+                 {target.__name__:target, SELF_OWNER:target})
         scope.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
         # isinstance can call a user's __getattribute__('__class__') here.
         scope.update({k:v for k,v in names.items()
@@ -662,7 +664,9 @@ class Compiler:
                 base = typing.get_origin(original) or original
                 if not isinstance(base, type) or base in scopes or base not in current.__bases__:
                     continue
-                base_scope = self.module_names(base, current_scope) | {base.__name__: base}
+                base_scope = (self.module_names(base, current_scope) |
+                              dict(type.__getattribute__(base, '__dict__')) |
+                              {base.__name__: base})
                 parameters = getattr(base, '__type_params__', ()) or getattr(base, '__parameters__', ())
                 arguments = typing.get_args(original)
                 if parameters and arguments:
@@ -724,6 +728,8 @@ class Compiler:
             return Contract('any', 'TypeAlias')
         if target is dataclasses.KW_ONLY:
             return Contract('kw_only', 'KW_ONLY')
+        if target is dataclasses.InitVar:
+            return Contract('initvar', 'InitVar', (Contract('any', 'Any'),))
         if isinstance(target, dataclasses.InitVar):
             return Contract('initvar', str(target),
                             (self.compile(target.type, names),))
