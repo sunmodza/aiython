@@ -16,7 +16,7 @@ import weakref
 
 from .frontend import RUNTIME_NAME
 from .type_constraints import (Contract, ContractCache, TypeViolation, compile_contract,
-                               annotations_of, Compiler, SELF_OWNER)
+                               annotations_of, descriptor_field, Compiler, SELF_OWNER)
 
 SCOPE = '__aiython_type_scope__'
 _FRAME_SCOPES = ContextVar('aiython_frame_scopes', default=())
@@ -160,7 +160,8 @@ class TypeRuntime:
         kind = type(value)
         if kind is dataclasses.Field:
             return True
-        if inspect.getattr_static(kind, '__get__', None) is not None:
+        if any(inspect.getattr_static(kind, method, None) is not None
+               for method in ('__get__', '__set__', '__delete__')):
             return True
         for module_name, class_name in (('pydantic.fields', 'FieldInfo'),
                                         ('pydantic.fields', 'ModelPrivateAttr'),
@@ -509,10 +510,12 @@ class TypeRuntime:
                 source = fields.get(name)
                 contract = None
                 if source:
-                    namespace = Compiler.module_names(target,self.namespace(frame))
-                    namespace[SELF_OWNER] = target
-                    namespace.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
-                    contract = compile_contract(source,namespace)
+                    scope = self.namespace(frame)
+                    if not descriptor_field(target, name, source, scope):
+                        namespace = Compiler.module_names(target, scope)
+                        namespace[SELF_OWNER] = target
+                        namespace.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
+                        contract = compile_contract(source,namespace)
             if contract:
                 if contract.marker == 'ClassVar' and not issubclass(type(owner), type):
                     raise TypeViolation(f'{name}: ClassVar must be assigned on the class')

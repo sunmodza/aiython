@@ -81,6 +81,35 @@ def annotations_of(target):
     return inspect.get_annotations(target, eval_str=False)
 
 
+def descriptor_field(target, name, source, namespace=None):
+    """Whether an annotation describes the descriptor stored on the class."""
+    try:
+        descriptor = inspect.getattr_static(target, name)
+    except AttributeError:
+        return False
+    kind = type(descriptor)
+    if not any(inspect.getattr_static(kind, method, None) is not None
+               for method in ('__get__', '__set__', '__delete__')):
+        return False
+    if source is kind:
+        return True
+    if not isinstance(source, str):
+        return False
+    try:
+        annotation = ast.parse(source, mode='eval').body
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            annotation = ast.parse(annotation.value, mode='eval').body
+    except SyntaxError:
+        return False
+    if isinstance(annotation, ast.Name):
+        if namespace is not None and annotation.id in namespace:
+            return namespace[annotation.id] is kind
+        return annotation.id == kind.__name__
+    if isinstance(annotation, ast.Attribute):
+        return ast.unparse(annotation) == f'{kind.__module__}.{kind.__name__}'
+    return False
+
+
 @dataclass
 class Contract:
     kind: str
@@ -649,6 +678,8 @@ class Compiler:
             if base in (object,dict): continue
             fields.update({name: (source, base) for name, source in annotations_of(base).items()})
         for name, (source, owner) in fields.items():
+            if descriptor_field(target, name, source, scopes.get(owner, scope)):
+                continue
             contract = self.compile(source, scopes.get(owner, scope))
             if (contract.marker == 'ClassVar' or contract.kind in ('initvar', 'kw_only')
                     or (issubclass(target, enum.Enum) and name in target.__members__)):

@@ -1019,6 +1019,30 @@ point = Point()
 point.values.append(1)
 print(point.values)
 ''',
+            'dataclass descriptor with local annotation': '''from dataclasses import dataclass
+def check():
+    class Descriptor:
+        def __get__(self, instance, owner=None):
+            return 100 if instance is None else instance._value
+        def __set__(self, instance, value):
+            instance._value = value
+    @dataclass
+    class Item:
+        value: Descriptor = Descriptor()
+    first, second = Item(), Item(5)
+    second.value = 7
+    print(first.value, second.value)
+    class Setter:
+        calls = []
+        def __set__(self, instance, value):
+            self.calls.append(value)
+    @dataclass
+    class SetOnly:
+        value: Setter = Setter()
+    SetOnly(3)
+    print(SetOnly.value.calls)
+check()
+''',
             'pydantic field descriptors': '''from pydantic import BaseModel, Field
 class Point(BaseModel):
     x: int = Field(default=1, ge=0)

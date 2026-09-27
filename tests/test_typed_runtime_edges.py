@@ -61,6 +61,21 @@ class TypeRuntimeEdgeTests(unittest.TestCase):
         self.runtime.check_frame(inspect.currentframe())
         self.assertEqual(items[0].value, 2)
 
+    def test_annotation_without_class_descriptor_still_checks_instance(self):
+        class Descriptor:
+            def __set__(self, instance, value):
+                pass
+
+        class Item:
+            value: Descriptor
+
+        item = Item()
+        with self.assertRaises(TypeViolation):
+            self.runtime.assign_attribute(item, 'value', 5)
+        value = Descriptor()
+        self.runtime.assign_attribute(item, 'value', value)
+        self.assertIs(item.value, value)
+
     def test_return_yield_abort_leave_and_send(self):
         self.assertEqual(self.runtime.returned(3), 3)
         self.assertEqual(self.runtime.yielded(3), 3)
