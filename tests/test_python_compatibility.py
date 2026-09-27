@@ -1090,7 +1090,9 @@ print(first, second)
     value: tuple[*Ts]
     def __init__(self, value: tuple[*Ts]): self.value = value
 box: Box[int, str] = Box((1, 'x'))
-print(box.value)
+class Child[*Us](Box[*Us]): pass
+child: Child[int, str] = Child((2, 'y'))
+print(box.value, child.value)
 '''
             cases['inherited generic fields'] = '''class Base[T]:
     value: T

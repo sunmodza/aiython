@@ -50,6 +50,22 @@ class ContractEdgeTests(unittest.TestCase):
             with self.subTest(value=value, other=other), self.assertRaises(tc.TypeViolation):
                 contract.validate(namespace['Child'](value, other))
 
+    @unittest.skipIf(sys.version_info < (3, 12), 'variadic class syntax requires Python 3.12')
+    def test_inherited_variadic_generic_fields_expand_arguments(self):
+        namespace = {'__name__': __name__}
+        exec('class Base[*Ts]:\n'
+             '    value: tuple[*Ts]\n'
+             '    def __init__(self, value): self.value = value\n'
+             'class Child[*Us](Base[*Us]): pass\n', namespace)
+        child = namespace['Child']
+        for annotation, valid, invalid in (('Child[int, str]', (1, 'x'), (1, 2)),
+                                           ('Child[()]', (), (1,))):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                contract.validate(child(valid))
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(child(invalid))
+
     @unittest.skipIf(sys.version_info < (3, 12), 'generic class syntax requires Python 3.12')
     def test_variadic_generic_class_specialization(self):
         namespace = {'__name__': __name__}

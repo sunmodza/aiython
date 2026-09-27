@@ -436,8 +436,14 @@ class Compiler:
                 parameters = getattr(base, '__type_params__', ()) or getattr(base, '__parameters__', ())
                 arguments = typing.get_args(original)
                 if parameters and arguments:
-                    compiled = tuple(self.compile(arg, current_scope) for arg in arguments)
-                    base_scope.update(self.parameter_bindings(parameters, compiled, current_scope,
+                    compiled = []
+                    for arg in arguments:
+                        contract = self.compile(arg, current_scope)
+                        if contract.kind == 'unpack_fixed':
+                            compiled.extend(contract.args)
+                        else:
+                            compiled.append(contract)
+                    base_scope.update(self.parameter_bindings(parameters, tuple(compiled), current_scope,
                                                               'Generic type argument count mismatch'))
                 else:
                     base_scope.update({parameter.__name__: parameter for parameter in parameters})
