@@ -16,7 +16,7 @@ import weakref
 
 from .frontend import RUNTIME_NAME
 from .type_constraints import (Contract, ContractCache, TypeViolation, compile_contract,
-                               annotations_of, descriptor_field, Compiler, SELF_OWNER)
+                               annotations_of, class_parameters, descriptor_field, Compiler, SELF_OWNER)
 
 SCOPE = '__aiython_type_scope__'
 _FRAME_SCOPES = ContextVar('aiython_frame_scopes', default=())
@@ -226,7 +226,18 @@ class TypeRuntime:
 
     @staticmethod
     def namespace(frame):
-        namespace = dict(frame.f_globals) | dict(frame.f_locals)
+        namespace = dict(frame.f_globals)
+        if frame.f_code.co_name != '<module>' and not frame.f_code.co_flags & inspect.CO_OPTIMIZED:
+            parents = []
+            parent = frame.f_back
+            while parent is not None and parent.f_code.co_filename == frame.f_code.co_filename:
+                if (parent.f_code.co_flags & inspect.CO_OPTIMIZED
+                        and frame.f_code.co_qualname.startswith(parent.f_code.co_qualname + '.<locals>.')):
+                    parents.append(dict(parent.f_locals))
+                parent = parent.f_back
+            for local in reversed(parents):
+                namespace.update(local)
+        namespace.update(frame.f_locals)
         scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
         if isinstance(scope,Scope):
             namespace.update({parameter.__name__: bound for parameter,bound in scope.bindings.items()})
@@ -379,8 +390,15 @@ class TypeRuntime:
             classes = frozenset(self.classes)
         if classes:
             seen = set()
-            if frame.f_code.co_name in ('__init__', '__setstate__') and 'self' in frame.f_locals:
-                seen.add(id(frame.f_locals['self']))
+            if 'self' in frame.f_locals:
+                receiver = frame.f_locals['self']
+                parent = frame
+                while parent is not None:
+                    if (parent.f_code.co_name in ('__init__', '__setstate__')
+                            and parent.f_locals.get('self') is receiver):
+                        seen.add(id(receiver))
+                        break
+                    parent = parent.f_back
             for namespace in (frame.f_locals,frame.f_globals):
                 for name,candidate in namespace.items():
                     if not name.startswith('__'):
@@ -514,7 +532,7 @@ class TypeRuntime:
                     if not descriptor_field(target, name, source, scope):
                         namespace = Compiler.module_names(target, scope)
                         namespace[SELF_OWNER] = target
-                        namespace.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
+                        namespace.update({p.__name__:p for p in class_parameters(target)})
                         contract = compile_contract(source,namespace)
             if contract:
                 if contract.marker == 'ClassVar' and not issubclass(type(owner), type):

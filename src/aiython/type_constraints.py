@@ -81,6 +81,39 @@ def annotations_of(target):
     return inspect.get_annotations(target, eval_str=False)
 
 
+def class_parameters(target):
+    if not isinstance(target, type):
+        return ()
+    for name in ('__type_params__', '__parameters__'):
+        try:
+            parameters = type.__getattribute__(target, name)
+        except AttributeError:
+            continue
+        if isinstance(parameters, tuple) and parameters:
+            return parameters
+    return ()
+
+
+def annotation_locals(target):
+    if not isinstance(target, type):
+        return {}
+    try:
+        annotator = type.__getattribute__(target, '__annotate__')
+    except AttributeError:
+        return {}
+    if not isinstance(annotator, types.FunctionType):
+        return {}
+    names = {}
+    for name, cell in zip(annotator.__code__.co_freevars, annotator.__closure__ or ()):
+        if name == '__classdict__':
+            continue
+        try:
+            names[name] = cell.cell_contents
+        except ValueError:
+            pass
+    return names
+
+
 def descriptor_field(target, name, source, namespace=None):
     """Whether an annotation describes the descriptor stored on the class."""
     try:
@@ -564,8 +597,7 @@ class Compiler:
                 raise UnsupportedType('type requires one parameter')
             return Contract('type',label,args,python_type=type)
         if isinstance(base,TYPE_ALIAS_TYPES): return self.alias(base,names,args,label)
-        if isinstance(base,type) and (getattr(base,'__type_params__',()) or getattr(base,'__parameters__',())):
-            parameters = getattr(base,'__type_params__',()) or base.__parameters__
+        if isinstance(base,type) and (parameters := class_parameters(base)):
             scope = self.module_names(base,names)
             bindings = self.parameter_bindings(parameters, args, scope,
                                                'Generic type argument count mismatch')
@@ -631,8 +663,8 @@ class Compiler:
     @staticmethod
     def module_names(target,names):
         module = sys.modules.get(getattr(target,'__module__',''))
-        # Defining module names win over unrelated caller aliases.
-        return names | (vars(module) if module else {})
+        # Defining module and annotation closure names win over caller aliases.
+        return names | (vars(module) if module else {}) | annotation_locals(target)
 
     def class_contract(self,target,names,label=None):
         key = (id(target),label or target.__qualname__)
@@ -647,7 +679,7 @@ class Compiler:
         scope = (self.module_names(target,names) |
                  dict(type.__getattribute__(target, '__dict__')) |
                  {target.__name__:target, SELF_OWNER:target})
-        scope.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
+        scope.update({p.__name__:p for p in class_parameters(target)})
         # isinstance can call a user's __getattribute__('__class__') here.
         scope.update({k:v for k,v in names.items()
                       if (issubclass(type(v), Contract) or
@@ -667,7 +699,7 @@ class Compiler:
                 base_scope = (self.module_names(base, current_scope) |
                               dict(type.__getattribute__(base, '__dict__')) |
                               {base.__name__: base})
-                parameters = getattr(base, '__type_params__', ()) or getattr(base, '__parameters__', ())
+                parameters = class_parameters(base)
                 arguments = typing.get_args(original)
                 if parameters and arguments:
                     compiled = []
@@ -692,7 +724,10 @@ class Compiler:
         for base in reversed(target.__mro__):
             if base in (object,dict): continue
             fields.update({name: (source, base) for name, source in annotations_of(base).items()})
+        dataclass_fields = getattr(target, '__dataclass_fields__', None) if dataclasses.is_dataclass(target) else None
         for name, (source, owner) in fields.items():
+            if dataclass_fields is not None and name not in dataclass_fields:
+                continue
             if descriptor_field(target, name, source, scopes.get(owner, scope)):
                 continue
             contract = self.compile(source, scopes.get(owner, scope))

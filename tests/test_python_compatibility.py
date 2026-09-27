@@ -1098,6 +1098,75 @@ def check():
     print(SetOnly.value.calls)
 check()
 ''',
+            'dataclass local type alias before decoration': '''from dataclasses import dataclass
+def check():
+    alias = list
+    try:
+        @dataclass
+        class Item:
+            values: alias = []
+    except ValueError as error:
+        print(type(error).__name__, 'mutable default' in str(error))
+check()
+''',
+            'class annotation ignores dynamic caller alias': '''from dataclasses import dataclass
+class Expected:
+    pass
+def make():
+    @dataclass
+    class Item:
+        value: Expected = Expected()
+    return Item()
+def caller():
+    Expected = str
+    return make()
+print(type(caller().value).__name__)
+''',
+            'dataclass escaped local type': '''from dataclasses import dataclass
+def make():
+    class Local:
+        pass
+    @dataclass
+    class Box:
+        value: Local
+    return Box(Local())
+box = make()
+box.value = type(box.value)()
+print(type(box.value).__name__)
+''',
+            'dataclass intermediate non-dataclass base': '''from dataclasses import dataclass
+@dataclass
+class Base:
+    x: int
+class Middle(Base):
+    y: int
+@dataclass
+class Child(Middle):
+    z: int
+child = Child(1, 2)
+print(child.x, child.z, hasattr(child, 'y'))
+''',
+            'dataclass generated init calls custom setter': '''from dataclasses import dataclass
+calls = []
+@dataclass
+class Pair:
+    left: int
+    right: int
+    def __setattr__(self, name, value):
+        calls.append((name, value))
+        object.__setattr__(self, name, value)
+pair = Pair(1, 2)
+print(calls, pair.left, pair.right)
+''',
+            'dataclass subclass of GenericAlias': '''from dataclasses import dataclass
+import types
+@dataclass
+class Alias(types.GenericAlias):
+    origin: type
+    args: type
+alias = Alias(list, int)
+print(alias.__origin__.__name__, alias.__args__[0].__name__)
+''',
             'pydantic field descriptors': '''from pydantic import BaseModel, Field
 class Point(BaseModel):
     x: int = Field(default=1, ge=0)

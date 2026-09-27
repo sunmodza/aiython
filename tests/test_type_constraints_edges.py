@@ -603,6 +603,24 @@ class ContractEdgeTests(unittest.TestCase):
                     contract.validate(bad)
         self.assertEqual(tc.compile_contract(tc.dataclasses.InitVar, {}).kind, 'initvar')
 
+    def test_escaped_class_keeps_lexical_annotation_type(self):
+        def make():
+            class Local:
+                pass
+
+            class Holder:
+                value: Local
+
+            return Holder, Local
+
+        holder_type, value_type = make()
+        holder = holder_type()
+        holder.value = value_type()
+        tc.compile_contract(holder_type, {}).validate(holder)
+        holder.value = object()
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract(holder_type, {}).validate(holder)
+
     def test_class_custom_validator_and_missing_field(self):
         class Choice:
             value: int
