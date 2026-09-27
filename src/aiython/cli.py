@@ -252,6 +252,7 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     old_last = ({name: vars(sys).get(name, missing_last)
                  for name in ('last_type', 'last_value', 'last_exc', 'last_traceback')}
                 if interactive and restore_state else {})
+    old_underscore = vars(builtins).get('_', missing_last) if interactive and restore_state else missing_last
     interpreter_args = [*interpreter_arguments(), *(['-i'] if interactive else [])]
     old_spawn_entry = os.environ.get("AIYTHON_SPAWN_ENTRY")
     finder = ProjectFinder(runtime)
@@ -299,7 +300,9 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                     trace = trace.tb_next
                 trace = trace or exc.__traceback__
                 sys.last_type = type(exc)
-                sys.last_value = sys.last_exc = exc.with_traceback(trace)
+                sys.last_value = exc.with_traceback(trace)
+                if sys.version_info >= (3, 12):
+                    sys.last_exc = sys.last_value
                 sys.last_traceback = trace
                 runtime.types.interactive_scope.failed = False
                 sys.excepthook(type(exc), exc, trace)
@@ -316,6 +319,11 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
         return module.__dict__
     finally:
         if restore_state:
+            if interactive:
+                if old_underscore is missing_last:
+                    vars(builtins).pop('_', None)
+                else:
+                    builtins._ = old_underscore
             for name, value in old_last.items():
                 if value is missing_last:
                     vars(sys).pop(name, None)
@@ -362,6 +370,11 @@ def run_repl(*, config_path=None, profile=None, force_profile=None,
     finder = ProjectFinder(runtime)
     old_main = sys.modules.get('__main__')
     old_argv, old_orig_argv, old_path = sys.argv, sys.orig_argv, sys.path[:]
+    missing_last = object()
+    old_last = ({name: vars(sys).get(name, missing_last)
+                 for name in ('last_type', 'last_value', 'last_exc', 'last_traceback')}
+                if restore_state else {})
+    old_underscore = vars(builtins).get('_', missing_last) if restore_state else missing_last
     execution_started = None
     def finish():
         if stats:
@@ -414,6 +427,15 @@ def run_repl(*, config_path=None, profile=None, force_profile=None,
         return module.__dict__
     finally:
         if restore_state:
+            if old_underscore is missing_last:
+                vars(builtins).pop('_', None)
+            else:
+                builtins._ = old_underscore
+            for name, value in old_last.items():
+                if value is missing_last:
+                    vars(sys).pop(name, None)
+                else:
+                    setattr(sys, name, value)
             sys.meta_path.remove(finder)
             sys.argv, sys.orig_argv, sys.path[:] = old_argv, old_orig_argv, old_path
             if old_main is None:

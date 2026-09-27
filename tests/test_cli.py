@@ -1,3 +1,4 @@
+import builtins
 import contextlib
 import importlib.metadata
 import io
@@ -60,6 +61,26 @@ class CLITests(unittest.TestCase):
         self.assertEqual(orig_argv[0], sys.executable)
         if not sys.flags.safe_path:
             self.assertEqual(path, '')
+
+    def test_embedded_repl_restores_host_exception_state(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        names = ('last_type', 'last_value', 'last_exc', 'last_traceback')
+        previous = {name: (name in vars(sys), vars(sys).get(name)) for name in names}
+        previous_underscore = ('_' in vars(builtins), vars(builtins).get('_'))
+        output = io.StringIO()
+        with patch.object(sys, 'stdin', Terminal('value: int = "bad"\n'
+                                                 'import sys\n'
+                                                 "print(type(getattr(sys, 'last_exc', sys.last_value)).__name__)\n"
+                                                 '2\n')), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            run_repl(restore_state=True)
+        self.assertIn('TypeViolation\n', output.getvalue())
+        self.assertIn('2\n', output.getvalue())
+        self.assertEqual({name: (name in vars(sys), vars(sys).get(name)) for name in names}, previous)
+        self.assertEqual(('_' in vars(builtins), vars(builtins).get('_')), previous_underscore)
 
     def test_repl_runs_python_startup_in_interactive_namespace(self):
         class Terminal(io.StringIO):
@@ -134,11 +155,13 @@ class CLITests(unittest.TestCase):
             path = Path(directory) / 'main.py'
             path.write_text('value: int = 2\n')
             output, errors = io.StringIO(), io.StringIO()
+            previous_underscore = ('_' in vars(builtins), vars(builtins).get('_'))
             previous_last = {name: (name in vars(sys), vars(sys).get(name))
                              for name in ('last_type', 'last_value', 'last_exc', 'last_traceback')}
             with patch.object(sys, 'stdin', Terminal('answer = value + 1\n'
                                                        "value = 'bad'\n"
-                                                       "print(answer, value, '__file__' in globals())\n")), \
+                                                       "print(answer, value, '__file__' in globals())\n"
+                                                       'answer\n')), \
                     contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                 namespace = run_script(path, interactive=True)
             self.assertEqual(namespace['answer'], 3)
@@ -146,16 +169,19 @@ class CLITests(unittest.TestCase):
             self.assertIn('TypeViolation', errors.getvalue())
             self.assertEqual({name: (name in vars(sys), vars(sys).get(name))
                               for name in previous_last}, previous_last)
+            self.assertEqual(('_' in vars(builtins), vars(builtins).get('_')), previous_underscore)
 
     def test_interactive_flag_enters_console_after_script_error(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'main.py'
             path.write_text('value = 3\nraise SystemExit(2)\n')
             result = subprocess.run([sys.executable, '-m', 'aiython', '-i', str(path)],
-                                    input='import sys\nprint(value, type(sys.last_exc).__name__)\n',
+                                    input=('import sys\n'
+                                           "print(value, type(getattr(sys, 'last_exc', sys.last_value)).__name__, "
+                                           "hasattr(sys, 'last_exc'))\n"),
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('3 SystemExit\n', result.stdout)
+            self.assertIn(f'3 SystemExit {sys.version_info >= (3, 12)}\n', result.stdout)
             self.assertIn('SystemExit: 2', result.stderr)
             self.assertNotIn('in run_script', result.stderr)
 
