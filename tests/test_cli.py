@@ -59,6 +59,46 @@ class CLITests(unittest.TestCase):
         if not sys.flags.safe_path:
             self.assertEqual(path, '')
 
+    def test_repl_runs_python_startup_in_interactive_namespace(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            startup = Path(directory) / 'startup.py'
+            startup.write_text('startup_value: int = 4\n'
+                               "startup_file = __file__\n")
+            terminal = Terminal('answer = startup_value + 1\n'
+                                "startup_value = 'bad'\n")
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', terminal), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                namespace = run_repl(restore_state=True)
+            self.assertEqual(namespace['answer'], 5)
+            self.assertEqual(namespace['startup_file'], str(startup))
+            self.assertNotIn('__file__', namespace)
+            self.assertIn('TypeViolation', errors.getvalue())
+
+    def test_repl_continues_after_python_startup_encoding_error(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            startup = Path(directory) / 'startup.py'
+            startup.write_text('# coding: does-not-exist\n')
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', Terminal('answer = 3\n')), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                namespace = run_repl(restore_state=True)
+            self.assertEqual(namespace['answer'], 3)
+            self.assertIn('SyntaxError', errors.getvalue())
+            self.assertNotIn('run_repl', errors.getvalue())
+
     def test_repl_options_and_piped_stdin_without_script(self):
         class Terminal(io.StringIO):
             def isatty(self):

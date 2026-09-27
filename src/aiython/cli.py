@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import tokenize
+import traceback
 import types
 import warnings
 import zipfile
@@ -349,6 +350,31 @@ def run_repl(*, config_path=None, profile=None, force_profile=None,
                   f'Python {sys.version} on {sys.platform}\n'
                   'Type "help", "copyright", "credits" or "license" for more information.')
         execution_started = perf_counter()
+        startup = os.environ.get('PYTHONSTARTUP') if not sys.flags.ignore_environment else None
+        if startup:
+            try:
+                with tokenize.open(startup) as source_file:
+                    source = source_file.read()
+            except OSError as exc:
+                print('Could not open PYTHONSTARTUP', file=sys.stderr)
+                print(f'{type(exc).__name__}: {exc}', file=sys.stderr)
+            except (SyntaxError, UnicodeError) as exc:
+                traceback.print_exception(type(exc), exc, None)
+            else:
+                module.__file__ = startup
+                try:
+                    try:
+                        code = runtime.compile_source(source, startup, entry=True)
+                    except (SyntaxError, OverflowError, ValueError) as exc:
+                        traceback.print_exception(type(exc), exc, None)
+                    else:
+                        console.runcode(code)
+                except SystemExit:
+                    raise
+                except BaseException:
+                    traceback.print_exc()
+                finally:
+                    module.__dict__.pop('__file__', None)
         console.interact(banner=banner, exitmsg='')
         return module.__dict__
     finally:
