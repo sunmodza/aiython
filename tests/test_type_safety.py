@@ -132,6 +132,49 @@ answer = (type(child.clone()), type(Child.create()), type(child.same), type(chil
                                 '\nclass Child(Base): pass\n' +
                                 ('Child.create()\n' if 'classmethod' in method else 'Child().clone()\n'))
 
+    def test_self_in_methods_assigned_after_class_creation(self):
+        prelude = '''from typing import Self
+class Base: pass
+class Child(Base): pass
+def clone(this) -> Self:
+    return type(this)()
+def create(klass) -> Self:
+    return klass()
+Base.clone = clone
+Base.create = classmethod(create)
+'''
+        result = self.run_source(prelude + '''child = Child()
+answer = (type(child.clone()), type(Child.create()))
+''')
+        self.assertEqual(result['answer'], (result['Child'], result['Child']))
+        late = self.run_source('''from typing import Self as S
+class Base: pass
+class Child(Base): pass
+def clone(this) -> S:
+    return type(this)()
+setattr(Base, 'clone', clone)
+answer = type(Child().clone())
+''')
+        self.assertIs(late['answer'], late['Child'])
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from typing import Self
+class Base: pass
+class Child(Base): pass
+def wrong(this) -> Self:
+    return Base()
+Base.clone = wrong
+Child().clone()
+''')
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from typing import Self
+class Base: pass
+class Child(Base): pass
+def wrong(this) -> Self:
+    return Base()
+setattr(Base, 'clone', wrong)
+Child().clone()
+''')
+
     @unittest.skipIf(sys.version_info < (3, 12), "The type statement requires Python 3.12")
     def test_forward_local_alias_is_captured(self):
         self.assertEqual(self.run_source('''def factory():

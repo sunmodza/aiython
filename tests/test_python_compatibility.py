@@ -1206,6 +1206,15 @@ class Child(Base): pass
 child = Child()
 print(type(child.clone()).__name__, type(Child.create()).__name__, type(child.same).__name__)
 ''',
+            'self in assigned methods': '''from typing import Self
+class Base: pass
+class Child(Base): pass
+def clone(this) -> Self: return type(this)()
+def create(klass) -> Self: return klass()
+Base.clone = clone
+setattr(Base, 'create', classmethod(create))
+print(type(Child().clone()).__name__, type(Child.create()).__name__)
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
