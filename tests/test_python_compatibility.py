@@ -191,12 +191,47 @@ print(next(item))
 try: item.send(7)
 except StopIteration: pass
 ''',
+            'generator locals': '''import inspect
+def generate(value):
+    yield sorted(locals())
+    yield sorted(inspect.currentframe().f_locals)
+    yield generate.__code__.co_varnames
+item = generate(3)
+print(next(item), next(item), next(item))
+''',
+            'generator collected after suspension': '''import gc, weakref
+def generate():
+    yield 1
+item = generate()
+reference = weakref.ref(item)
+next(item)
+del item
+gc.collect()
+print(reference() is None)
+''',
+            'generator resumed on another thread': '''from concurrent.futures import ThreadPoolExecutor
+def generate(value: int):
+    yield value
+    yield value + 1
+item = generate(2)
+print(next(item))
+with ThreadPoolExecutor(max_workers=1) as pool:
+    print(pool.submit(next, item).result())
+''',
             'async generator': '''import asyncio
 async def numbers():
     yield 1
     yield 2
 async def run():
     print([number async for number in numbers()])
+asyncio.run(run())
+''',
+            'async generator locals': '''import asyncio, inspect
+async def generate(value):
+    yield sorted(locals())
+    yield sorted(inspect.currentframe().f_locals)
+async def run():
+    print([item async for item in generate(3)])
 asyncio.run(run())
 ''',
         }

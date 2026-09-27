@@ -584,9 +584,6 @@ class NestedCheckpoints(ast.NodeTransformer):
 
     @staticmethod
     def generated(node):
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith('__aiython_')
-                                                 for t in node.targets):
-            return True
         if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
             return False
         func = node.value.func

@@ -13,11 +13,16 @@ from .type_constraints import Contract, ContractCache, TypeViolation, compile_co
 
 SCOPE = '__aiython_type_scope__'
 _FRAME_SCOPES = ContextVar('aiython_frame_scopes', default=())
+_GENERATOR_SCOPES = {}
+_GENERATOR_SCOPES_LOCK = threading.Lock()
 
 
 def frame_scope(frame):
-    return next((scope for active, scope in reversed(_FRAME_SCOPES.get())
-                 if active is frame), None)
+    for active, scope in reversed(_FRAME_SCOPES.get()):
+        if active is frame:
+            return scope
+    with _GENERATOR_SCOPES_LOCK:
+        return _GENERATOR_SCOPES.get(id(frame))
 
 
 @dataclass
@@ -79,13 +84,6 @@ class TypeRuntime:
             scope.returned = self.contract(returns,namespace)
         return scope
 
-    def initialize(self, declarations, parameters=None, returns=None):
-        frame = inspect.currentframe().f_back
-        try:
-            return self._initialize(frame, declarations, parameters, returns)
-        finally:
-            del frame
-
     def enter_scope(self, declarations, parameters=None, returns=None):
         frame = inspect.currentframe().f_back
         try:
@@ -97,6 +95,23 @@ class TypeRuntime:
     def exit_scope(self):
         stack = _FRAME_SCOPES.get()
         _FRAME_SCOPES.set(stack[:-1])
+
+    def enter_generator_scope(self, declarations, parameters=None, returns=None):
+        frame = inspect.currentframe().f_back
+        try:
+            scope = self._initialize(frame, declarations, parameters, returns)
+            with _GENERATOR_SCOPES_LOCK:
+                _GENERATOR_SCOPES[id(frame)] = scope
+        finally:
+            del frame
+
+    def exit_generator_scope(self):
+        frame = inspect.currentframe().f_back
+        try:
+            with _GENERATOR_SCOPES_LOCK:
+                _GENERATOR_SCOPES.pop(id(frame), None)
+        finally:
+            del frame
 
     @staticmethod
     def scopes(frame):
@@ -335,7 +350,7 @@ class TypedTransformer(ast.NodeTransformer):
         for statement in body: collect(statement)
         return result
 
-    def body(self,body,*,parameters=None,returns=None,initialize=True,inherited=None,external_scope=False):
+    def body(self,body,*,parameters=None,returns=None,initialize=True,inherited=None,generator_scope=False):
         previous = self.declarations
         self.declarations = dict(inherited or {}) | self.declarations_in(body)
         output = []
@@ -345,8 +360,8 @@ class TypedTransformer(ast.NodeTransformer):
         while body and isinstance(body[0],ast.ImportFrom) and body[0].module == '__future__':
             header.append(body[0]); body = body[1:]
         if initialize:
-            initial = (ast.Expr(helper('enter_scope',literal(self.declarations),literal(parameters),literal(returns))) if external_scope else
-                       ast.Assign([ast.Name(SCOPE,ast.Store())],helper('initialize',literal(self.declarations),literal(parameters),literal(returns))))
+            initial = ast.Expr(helper('enter_generator_scope' if generator_scope else 'enter_scope',
+                                      literal(self.declarations),literal(parameters),literal(returns)))
             ast.copy_location(initial,body[0] if body else header[-1] if header else ast.Constant(None,lineno=1,col_offset=0))
             initial._aiython_scope_initializer = True
             output.append(initial)
@@ -370,7 +385,7 @@ class TypedTransformer(ast.NodeTransformer):
         if self.snippet:
             node.body = self.body(node.body,initialize=False)
             return node
-        body = self.body(node.body,external_scope=True)
+        body = self.body(node.body)
         initial = next(i for i,item in enumerate(body) if getattr(item,'_aiython_scope_initializer',False))
         header, enter, statements = body[:initial], body[initial], body[initial+1:]
         exit_call = ast.copy_location(ast.Expr(helper('exit_scope')), enter)
@@ -394,13 +409,12 @@ class TypedTransformer(ast.NodeTransformer):
         returns = ast.unparse(node.returns) if node.returns else None
         # Generator annotations require yield/send checks, not return-only checks.
         is_generator = any(isinstance(n,(ast.Yield,ast.YieldFrom)) for n in self.function_nodes(node))
-        external_scope = not is_generator
         used = {n.id for n in self.function_nodes(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Load)}
         nonlocal_names = {name for n in self.function_nodes(node) if isinstance(n,ast.Nonlocal) for name in n.names}
         assigned = {n.id for n in self.function_nodes(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store)} - nonlocal_names
         inherited = {name:source for name,source in parent_declarations.items() if name in (used|nonlocal_names) and name not in assigned and name not in parameters}
         node.body = self.body(node.body,parameters=parameters,returns=returns,
-                              inherited=inherited,external_scope=external_scope)
+                              inherited=inherited,generator_scope=is_generator)
         if isinstance(node,ast.AsyncFunctionDef) and is_generator:
             node.body.append(ast.copy_location(ast.Expr(helper('returned',ast.Constant(None))),node))
         else:
@@ -409,8 +423,7 @@ class TypedTransformer(ast.NodeTransformer):
         handler = ast.ExceptHandler(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'error_type',ast.Load()),None,
                                     [ast.Expr(helper('aborted')),ast.Raise()])
         final = ast.Expr(helper('leaving'))
-        if external_scope:
-            final = ast.Try([final],[],[],[ast.Expr(helper('exit_scope'))])
+        final = ast.Try([final],[],[],[ast.Expr(helper('exit_generator_scope' if is_generator else 'exit_scope'))])
         guarded = ast.Try(node.body[initial+1:],[handler],[],[final])
         guarded._aiython_type_guard = True
         ast.copy_location(guarded,node)
@@ -431,7 +444,7 @@ class TypedTransformer(ast.NodeTransformer):
         node.decorator_list.insert(0, ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),'register_class',ast.Load()))
         previous = self.function
         self.function = False
-        body = self.body(node.body,external_scope=True)
+        body = self.body(node.body)
         header = body[:1] if isinstance(body[0],ast.Expr) and isinstance(body[0].value,ast.Constant) and isinstance(body[0].value.value,str) else []
         enter, *statements = body[len(header):]
         exit_call = ast.copy_location(ast.Expr(helper('exit_scope')), node)
