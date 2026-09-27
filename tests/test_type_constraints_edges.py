@@ -3,6 +3,7 @@ from collections import Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import enum
 from pathlib import Path
+import re
 import sys
 import typing
 import types
@@ -16,6 +17,22 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_regex_generic_annotations_check_input_type(self):
+        namespace = {'re': re, 'typing': typing}
+        cases = (
+            ('re.Pattern[str]', re.compile('a'), re.compile(b'a'), 'pattern'),
+            ('typing.Pattern[str]', re.compile('a'), re.compile(b'a'), 'pattern'),
+            ('re.Match[bytes]', re.match(b'a', b'a'), re.match('a', 'a'), 'match'),
+            ('typing.Match[str]', re.match('a', 'a'), re.match(b'a', b'a'), 'match'),
+        )
+        for annotation, valid, invalid, kind in cases:
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                self.assertEqual(contract.schema()['x-python-regex'], kind)
+                contract.validate(valid)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(invalid)
+
     def test_concrete_collections_preserve_generic_member_checks(self):
         namespace = {'typing': typing, 'deque': deque, 'defaultdict': defaultdict,
                      'OrderedDict': OrderedDict, 'Counter': Counter}

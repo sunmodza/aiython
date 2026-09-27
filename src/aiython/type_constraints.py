@@ -14,6 +14,7 @@ import dataclasses
 import enum
 from functools import lru_cache
 import inspect
+import re
 import sys
 import types
 import typing
@@ -93,6 +94,8 @@ class Contract:
             if members: result['x-python-enum-members'] = members
         elif kind == 'null': result = {'type': 'null'}
         elif kind == 'callable': result = {'x-python-callable': True}
+        elif kind in ('pattern', 'match'):
+            result = {'x-python-regex': kind, 'x-python-input-type': self.args[0].schema(seen)}
         elif kind in ('str', 'int', 'float', 'bool'):
             result = {'type': {'str':'string', 'int':'integer', 'float':'number', 'bool':'boolean'}[kind]}
         elif kind in ('list', 'set', 'frozenset', 'sequence', 'deque'):
@@ -159,6 +162,11 @@ class Contract:
             fail()
         elif kind == 'literal':
             if not any(type(value) is type(v) and value == v for v in self.args): fail('not an allowed literal')
+        elif kind in ('pattern', 'match'):
+            expected = re.Pattern if kind == 'pattern' else re.Match
+            if type(value) is not expected: fail()
+            child(self.args[0], value.pattern if kind == 'pattern' else value.string,
+                  '.pattern' if kind == 'pattern' else '.string')
         elif kind == 'null':
             if value is not None: fail()
         elif kind in ('str','int','float','bool','bytes','complex'):
@@ -303,6 +311,11 @@ class Compiler:
             return args[0]
         if origin is abc.Callable:
             return Contract('callable',label)
+        if origin in (re.Pattern, re.Match):
+            if len(args) > 1:
+                raise UnsupportedType('Regex type requires one input type')
+            return Contract('pattern' if origin is re.Pattern else 'match', label,
+                            args or (Contract('any', 'Any'),))
         if origin in (typing.Union,types.UnionType):
             return Contract('union',label,args)
         if base is typing.Optional:

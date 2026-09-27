@@ -1095,6 +1095,12 @@ ordered: OrderedDict[str, int] = OrderedDict([('a', 4)])
 counts: Counter[str] = Counter({'a': 2})
 print(list(numbers), dict(mapping), list(ordered.items()), dict(counts))
 ''',
+            'generic regex': '''import re
+from typing import Pattern, Match
+pattern: Pattern[str] = re.compile('a+')
+match: Match[str] | None = pattern.search('aa')
+print(pattern.pattern, match.group() if match else None)
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args
