@@ -348,6 +348,21 @@ class Item:
 item = Item('bad')
 ''')
 
+    def test_dataclass_initvar_input_and_factory_field_are_checked(self):
+        prelude = '''from dataclasses import InitVar, dataclass, field
+@dataclass
+class Item:
+    offset: InitVar[int]
+    values: list[int] = field(default_factory=list)
+    def __post_init__(self, offset):
+        self.values.append(offset)
+'''
+        self.assertEqual(self.run_source(prelude + 'item = Item(2)\nanswer = item.values\n')['answer'], [2])
+        with self.assertRaises(TypeViolation):
+            self.run_source(prelude + "Item('bad')\n")
+        with self.assertRaises(TypeViolation):
+            self.run_source(prelude + "item = Item(2)\nitem.values.append('bad')\n")
+
     def test_typed_natural_language_keeps_subscript_inside_statement(self):
         from aiython.frontend import parse
         unit = parse('analysis: TicketAnalysis = analyze the ticket from ticket["message"]\n','test.py')

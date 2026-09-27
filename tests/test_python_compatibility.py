@@ -944,6 +944,32 @@ class Point:
     x: int
 print(Point(2).x, hasattr(Point(2), '__dict__'))
 ''',
+            'dataclass InitVar and post init': '''from dataclasses import dataclass, InitVar
+@dataclass
+class Point:
+    x: int
+    offset: InitVar[int]
+    def __post_init__(self, offset):
+        self.x += offset
+point = Point(1, 2)
+print(point.x, hasattr(point, 'offset'))
+''',
+            'dataclass keyword only marker': '''from dataclasses import dataclass, KW_ONLY
+@dataclass
+class Point:
+    x: int
+    _: KW_ONLY
+    label: str = 'x'
+print(Point(1, label='ready').x, Point(1).label)
+''',
+            'dataclass default factory': '''from dataclasses import dataclass, field
+@dataclass
+class Point:
+    values: list[int] = field(default_factory=list)
+point = Point()
+point.values.append(1)
+print(point.values)
+''',
             'enum': '''from enum import Enum
 class Color(Enum):
     RED = 1

@@ -191,7 +191,7 @@ class Contract:
         elif kind == 'typeddict' or (kind == 'class' and self.fields):
             result = {'type':'object', 'properties':{k:v.schema(seen) for k,v in self.fields.items()},
                       'required': sorted(self.required)}
-        elif kind in ('annotated', 'qualifier', 'alias', 'unpack_typeddict'):
+        elif kind in ('annotated', 'qualifier', 'alias', 'unpack_typeddict', 'initvar'):
             result = self.args[0].schema(seen)
         elif kind == 'typevar':
             result = {'anyOf':[a.schema(seen) for a in self.args]} if self.args else {}
@@ -221,8 +221,10 @@ class Contract:
             raise TypeViolation(f'{path}: expected {self.name}, got {type(value).__name__}' + (f' ({detail})' if detail else ''))
         def child(contract, item, suffix):
             contract.validate(item, path + suffix, bindings=bindings, seen=seen)
-        if kind in ('alias', 'annotated', 'qualifier', 'unpack_typeddict'):
+        if kind in ('alias', 'annotated', 'qualifier', 'unpack_typeddict', 'initvar'):
             child(self.args[0], value, '')
+        elif kind == 'kw_only':
+            raise UnsupportedType('KW_ONLY marks dataclass parameters; it is not a value type')
         elif kind == 'never': fail('this boundary must not return')
         elif kind == 'union':
             for contract in self.args:
@@ -422,6 +424,10 @@ class Compiler:
 
     def generic(self,base,args,label,names):
         origin = typing.get_origin(base) or base
+        if origin is dataclasses.InitVar:
+            if len(args) != 1:
+                raise UnsupportedType('InitVar requires one type')
+            return Contract('initvar', label, args)
         if origin is typing.Unpack and len(args) == 1 and args[0].kind in ('unpack_any', 'unpack_fixed'):
             return args[0]
         if origin is typing.Unpack and len(args) == 1:
@@ -634,7 +640,7 @@ class Compiler:
             fields.update({name: (source, base) for name, source in annotations_of(base).items()})
         for name, (source, owner) in fields.items():
             contract = self.compile(source, scopes.get(owner, scope))
-            if contract.marker == 'ClassVar':
+            if contract.marker == 'ClassVar' or contract.kind in ('initvar', 'kw_only'):
                 continue
             result.fields[name] = contract
         if record:
@@ -663,6 +669,11 @@ class Compiler:
                                       python_type={'str':str, 'bytes':bytes}.get(stream_type)),))
         if target is typing.TypeAlias or target is TypeAlias:
             return Contract('any', 'TypeAlias')
+        if target is dataclasses.KW_ONLY:
+            return Contract('kw_only', 'KW_ONLY')
+        if isinstance(target, dataclasses.InitVar):
+            return Contract('initvar', str(target),
+                            (self.compile(target.type, names),))
         if isinstance(target, typing.TypeVarTuple):
             bound = names.get(target, names.get(target.__name__))
             return (Contract('unpack_fixed', target.__name__, bound)
