@@ -14,6 +14,25 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    @unittest.skipIf(sys.version_info < (3, 12), 'type statements require Python 3.12')
+    def test_variadic_type_alias_specialization(self):
+        namespace = {'__name__': __name__}
+        exec('type TupleAlias[*Ts] = tuple[*Ts]\n'
+             'type Mixed[T, *Ts, U] = tuple[T, *Ts, U]\n', namespace)
+        specialized = tc.compile_contract('TupleAlias[int, str]', namespace)
+        specialized.validate((1, 'x'))
+        with self.assertRaises(tc.TypeViolation):
+            specialized.validate((1, 2))
+        tc.compile_contract('TupleAlias', namespace).validate((1, 'x', True))
+        empty = tc.compile_contract('TupleAlias[()]', namespace)
+        empty.validate(())
+        with self.assertRaises(tc.TypeViolation):
+            empty.validate((1,))
+        mixed = tc.compile_contract('Mixed[int, str, bool]', namespace)
+        mixed.validate((1, 'x', True))
+        with self.assertRaises(tc.TypeViolation):
+            mixed.validate((1, 'x', 3))
+
     def test_callable_contract_checks_callable_without_claiming_signature(self):
         for annotation in ('Callable[[int], str]', 'Callable[..., str]', 'Callable'):
             with self.subTest(annotation=annotation):
@@ -165,8 +184,9 @@ class CompilerEdgeTests(unittest.TestCase):
         variable = TypeVar('T')
         alias = tc.TypeAliasType('Items', list[variable], type_params=(variable,))
         compiler = tc.Compiler({'Items': alias})
-        with self.assertRaisesRegex(tc.UnsupportedType, 'Generic alias requires'):
-            compiler.compile(alias)
+        unspecialized = compiler.compile(alias)
+        self.assertEqual(unspecialized.schema()['type'], 'array')
+        unspecialized.validate([1, 2])
         with patch.object(tc, 'annotationlib', None):
             compiled = compiler.compile('Items[int]')
         self.assertEqual(compiled.schema()['type'], 'array')

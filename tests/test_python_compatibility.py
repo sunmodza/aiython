@@ -1080,6 +1080,12 @@ def mixed[*Ts](first: int, *args: *Ts) -> tuple[int, *Ts, str]:
 def forward[**P](*args: P.args, **kwargs: P.kwargs): return args, kwargs
 print(collect(1, 'x'), mixed(1, 2, 3), forward(1, x=2))
 '''
+            cases['variadic type aliases'] = '''type TupleAlias[*Ts] = tuple[*Ts]
+type Mixed[T, *Ts, U] = tuple[T, *Ts, U]
+first: TupleAlias[int, str] = (1, 'x')
+second: Mixed[int, str, bool] = (1, 'x', True)
+print(first, second)
+'''
         if sys.version_info >= (3, 14):
             cases['template string interpolation'] = '''events = []
 def pick():

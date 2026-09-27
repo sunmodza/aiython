@@ -253,6 +253,8 @@ class Compiler:
             parameter = names.get(node.value.id)
             if isinstance(parameter, typing.TypeVarTuple):
                 return Contract('unpack_any', ast.unparse(node), python_type=parameter)
+            if isinstance(parameter, tuple) and all(isinstance(item, Contract) for item in parameter):
+                return Contract('unpack_fixed', ast.unparse(node), parameter)
         if isinstance(node,ast.Subscript):
             base = self.lookup(node.value,names)
             nodes = node.slice.elts if isinstance(node.slice,ast.Tuple) else [node.slice]
@@ -263,6 +265,10 @@ class Compiler:
             if (base is typing.Unpack and len(nodes) == 1 and isinstance(nodes[0], ast.Name)
                     and isinstance(names.get(nodes[0].id), typing.TypeVarTuple)):
                 return Contract('unpack_any', ast.unparse(node), python_type=names[nodes[0].id])
+            if (base is typing.Unpack and len(nodes) == 1 and isinstance(nodes[0], ast.Name)
+                    and isinstance(names.get(nodes[0].id), tuple)
+                    and all(isinstance(item, Contract) for item in names[nodes[0].id])):
+                return Contract('unpack_fixed', ast.unparse(node), names[nodes[0].id])
             if base is typing.Literal:
                 values = tuple(self.lookup(n,names) if isinstance(n,ast.Attribute) else ast.literal_eval(n) for n in nodes)
                 if any(type(v) not in (str,int,bool,bytes,type(None)) and not isinstance(v,enum.Enum) for v in values):
@@ -278,6 +284,8 @@ class Compiler:
 
     def generic(self,base,args,label,names):
         origin = typing.get_origin(base) or base
+        if origin is typing.Unpack and len(args) == 1 and args[0].kind in ('unpack_any', 'unpack_fixed'):
+            return args[0]
         if origin is abc.Callable:
             return Contract('callable',label)
         if origin in (typing.Union,types.UnionType):
@@ -299,6 +307,13 @@ class Compiler:
             return Contract(containers[origin],label,args)
         if origin is tuple:
             if len(args) == 2 and args[1] is Ellipsis: return Contract('tuple_many',label,args[:1])
+            expanded = []
+            for arg in args:
+                if isinstance(arg, Contract) and arg.kind == 'unpack_fixed':
+                    expanded.extend(arg.args)
+                else:
+                    expanded.append(arg)
+            args = tuple(expanded)
             unpacked = [index for index, arg in enumerate(args)
                         if isinstance(arg, Contract) and arg.kind == 'unpack_any']
             if len(unpacked) == 1:
@@ -328,10 +343,29 @@ class Compiler:
 
     def alias(self,alias,names,args=(),label=None):
         parameters = alias.__type_params__
-        if parameters and len(args) != len(parameters):
-            raise UnsupportedType('Generic alias requires its type arguments')
-        scope = self.module_names(alias,names) | {p.__name__:a for p,a in zip(parameters,args)}
-        key = (id(alias),tuple(id(a) for a in args))
+        if not args and label is None:
+            bindings = {parameter.__name__: parameter for parameter in parameters}
+        else:
+            variadic = [index for index, parameter in enumerate(parameters)
+                        if isinstance(parameter, typing.TypeVarTuple)]
+            if len(variadic) > 1:
+                raise UnsupportedType('Only one TypeVarTuple can be specialized')
+            if variadic:
+                pivot = variadic[0]
+                suffix = len(parameters) - pivot - 1
+                if len(args) < len(parameters) - 1:
+                    raise UnsupportedType('Generic alias requires its type arguments')
+                bindings = {parameter.__name__: arg
+                            for parameter, arg in zip(parameters[:pivot], args[:pivot])}
+                bindings[parameters[pivot].__name__] = args[pivot:len(args) - suffix]
+                bindings.update({parameter.__name__: arg for parameter, arg in
+                                 zip(parameters[pivot + 1:], args[len(args) - suffix:])})
+            else:
+                if len(args) != len(parameters):
+                    raise UnsupportedType('Generic alias requires its type arguments')
+                bindings = {parameter.__name__: arg for parameter, arg in zip(parameters,args)}
+        scope = self.module_names(alias,names) | bindings
+        key = (id(alias), tuple(id(a) for a in args), label is None)
         if key in self.cache:
             return self.cache[key]
         result = Contract('alias',label or alias.__name__)
@@ -387,6 +421,11 @@ class Compiler:
         if isinstance(target,Contract): return target
         if target is None or target is type(None): return Contract('null','None')
         if target is typing.Any: return Contract('any','Any')
+        if isinstance(target, typing.TypeVarTuple):
+            bound = names.get(target.__name__)
+            return (Contract('unpack_fixed', target.__name__, bound)
+                    if isinstance(bound, tuple) and all(isinstance(item, Contract) for item in bound)
+                    else Contract('unpack_any', target.__name__, python_type=target))
         if target in (typing.Callable, abc.Callable):
             return Contract('callable',str(target))
         if target in (typing.Final,typing.ClassVar):
