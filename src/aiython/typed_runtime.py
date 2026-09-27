@@ -354,6 +354,25 @@ class TypeRuntime:
             return value
         finally: del frame
 
+    def _check_instances(self, candidate, classes, seen, frame):
+        if id(candidate) in seen or id(candidate) in self._active_instance_checks.get():
+            return
+        seen.add(id(candidate))
+        cls = type(candidate)
+        if cls in classes:
+            self._validate_instance(candidate, cls.__qualname__, frame)
+            try:
+                state = object.__getattribute__(candidate, '__dict__')
+            except AttributeError:
+                state = {}
+            self._check_instances(state, classes, seen, frame)
+        elif cls in (list, tuple, set, frozenset):
+            for item in candidate:
+                self._check_instances(item, classes, seen, frame)
+        elif cls is dict:
+            for item in candidate.values():
+                self._check_instances(item, classes, seen, frame)
+
     def check_frame(self,frame):
         with self._classes_lock:
             classes = frozenset(self.classes)
@@ -361,23 +380,10 @@ class TypeRuntime:
             seen = set()
             if frame.f_code.co_name == '__init__' and 'self' in frame.f_locals:
                 seen.add(id(frame.f_locals['self']))
-            def check_instances(candidate):
-                if id(candidate) in seen or id(candidate) in self._active_instance_checks.get(): return
-                seen.add(id(candidate))
-                cls = type(candidate)
-                if cls in classes:
-                    self._validate_instance(candidate, cls.__qualname__, frame)
-                    try: state = object.__getattribute__(candidate,'__dict__')
-                    except AttributeError: state = {}
-                    check_instances(state)
-                elif cls in (list,tuple,set,frozenset):
-                    for item in candidate: check_instances(item)
-                elif cls is dict:
-                    for item in candidate.values(): check_instances(item)
             for namespace in (frame.f_locals,frame.f_globals):
                 for name,candidate in namespace.items():
                     if not name.startswith('__'):
-                        check_instances(candidate)
+                        self._check_instances(candidate, classes, seen, frame)
         for scope, values in self.scopes(frame):
             for name, source in scope.declarations.items():
                 if (name in values and name not in scope.contracts
@@ -501,10 +507,12 @@ class TypeRuntime:
                 for base in reversed(target.__mro__):
                     fields.update(annotations_of(base))
                 source = fields.get(name)
-                namespace = Compiler.module_names(target,self.namespace(frame))
-                namespace[SELF_OWNER] = target
-                namespace.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
-                contract = compile_contract(source,namespace) if source else None
+                contract = None
+                if source:
+                    namespace = Compiler.module_names(target,self.namespace(frame))
+                    namespace[SELF_OWNER] = target
+                    namespace.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
+                    contract = compile_contract(source,namespace)
             if contract:
                 if contract.marker == 'ClassVar' and not issubclass(type(owner), type):
                     raise TypeViolation(f'{name}: ClassVar must be assigned on the class')

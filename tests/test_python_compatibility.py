@@ -1122,6 +1122,34 @@ print(next(item))
 try: item.send(7)
 except StopIteration: pass
 ''',
+            'generator function name changes': '''def generate():
+    yield 1
+item = generate()
+item.__name__ = 'item_name'
+item.__qualname__ = 'item_qualname'
+generate.__name__ = 'generate_name'
+generate.__qualname__ = 'generate_qualname'
+new_item = generate()
+print(item.__name__, item.__qualname__, new_item.__name__, new_item.__qualname__)
+''',
+            'generator close releases arguments': '''class DetectDelete:
+    def __init__(self):
+        DetectDelete.deleted = False
+    def __del__(self):
+        DetectDelete.deleted = True
+def generate(arg):
+    yield
+item = generate(DetectDelete())
+item.close()
+print(DetectDelete.deleted, item.gi_frame is None)
+item = generate(DetectDelete())
+next(item)
+item.close()
+print(DetectDelete.deleted, item.gi_frame is None)
+item = generate(DetectDelete())
+item.gi_frame.clear()
+print(DetectDelete.deleted, item.gi_frame is None)
+''',
             'generator delegation identity': '''from collections.abc import Generator
 def child():
     received = yield 1
