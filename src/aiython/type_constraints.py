@@ -36,11 +36,13 @@ TYPE_NARROWING_TYPES = tuple({TypeGuard, TypeIs, typing.TypeGuard,
                               getattr(typing, 'TypeIs', TypeIs)})
 CONCRETE_SEQUENCE_TYPES = {'list':list, 'set':set, 'frozenset':frozenset,
                            'deque':deque, 'tuple':tuple, 'tuple_many':tuple}
-CONCRETE_MAPPING_TYPES = {'dict':dict, 'mapping':dict, 'defaultdict':defaultdict,
+CONCRETE_MAPPING_TYPES = {'dict':dict, 'defaultdict':defaultdict,
                           'ordered_dict':OrderedDict, 'counter':Counter}
+SAFE_MAPPING_TYPES = (dict, defaultdict, OrderedDict, Counter)
 CONTAINER_KINDS = {list:'list', set:'set', frozenset:'frozenset', dict:'dict',
                    deque:'deque', defaultdict:'defaultdict', OrderedDict:'ordered_dict',
-                   Counter:'counter', abc.Sequence:'sequence', abc.Mapping:'mapping'}
+                   Counter:'counter', abc.Sequence:'sequence', abc.Mapping:'mapping',
+                   abc.MutableMapping:'mutable_mapping'}
 
 
 class TypeViolation(CapabilityError, TypeError):
@@ -112,7 +114,7 @@ class Contract:
                       'prefixItems': [item.schema(seen) for item in self.args[:pivot]],
                       'x-python-suffixItems': [item.schema(seen) for item in self.args[pivot + 1:]]}
         elif kind == 'tuple_many': result = {'type':'array', 'items':self.args[0].schema(seen)}
-        elif kind in ('dict', 'mapping', 'defaultdict', 'ordered_dict', 'counter'):
+        elif kind in ('dict', 'mapping', 'mutable_mapping', 'defaultdict', 'ordered_dict', 'counter'):
             result = {'type':'object', 'additionalProperties':self.args[1].schema(seen), 'x-key-schema':self.args[0].schema(seen)}
         elif kind == 'class' and isinstance(self.python_type,type) and issubclass(self.python_type,enum.Enum):
             values = [v.value for v in self.python_type]
@@ -208,9 +210,14 @@ class Contract:
             for index, contract in enumerate(self.args[pivot + 1:]):
                 position = len(value) - suffix + index
                 child(contract, value[position], f'[{position}]')
-        elif kind in ('dict','mapping','defaultdict','ordered_dict','counter'):
-            expected = CONCRETE_MAPPING_TYPES[kind]
-            if type(value) is not expected: fail(f'a concrete {expected.__name__} is required for deep checking')
+        elif kind in ('dict','mapping','mutable_mapping','defaultdict','ordered_dict','counter'):
+            if kind in ('mapping', 'mutable_mapping'):
+                if type(value) not in SAFE_MAPPING_TYPES:
+                    fail('only concrete mappings can be checked deeply')
+            else:
+                expected = CONCRETE_MAPPING_TYPES[kind]
+                if type(value) is not expected:
+                    fail(f'a concrete {expected.__name__} is required for deep checking')
             for index, (key,item) in enumerate(value.items()):
                 child(self.args[0],key,f'.keys[{index}]')
                 child(self.args[1],item,f'[{key!r}]' if type(key) in (str,int) else f'.values[{index}]')
@@ -344,7 +351,7 @@ class Compiler:
                 raise UnsupportedType('Qualifier requires one type')
             return Contract('qualifier',label,args,qualifier=base._name)
         if origin in CONTAINER_KINDS:
-            expected = 2 if origin in (dict,abc.Mapping,defaultdict,OrderedDict) else 1
+            expected = 2 if origin in (dict,abc.Mapping,abc.MutableMapping,defaultdict,OrderedDict) else 1
             if len(args) != expected:
                 raise UnsupportedType(f'{label}: wrong number of type parameters')
             if origin is Counter:

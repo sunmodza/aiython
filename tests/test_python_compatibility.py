@@ -1109,6 +1109,16 @@ def read_text(stream: TextIO) -> str: return stream.read()
 def read_any(stream: IO[AnyStr]) -> AnyStr: return stream.read()
 print(read_text(text), read_any(io.StringIO('gamma')), read_any(binary))
 ''',
+            'abstract mapping implementations': '''from collections import OrderedDict, defaultdict
+from typing import Mapping, MutableMapping
+def total(values: Mapping[str, int]) -> int: return sum(values.values())
+def increment(values: MutableMapping[str, int]) -> int:
+    values['x'] += 1
+    return values['x']
+ordered = OrderedDict(x=2)
+defaulted = defaultdict(int, x=3)
+print(total(ordered), increment(defaulted))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

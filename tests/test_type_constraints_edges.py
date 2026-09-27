@@ -18,6 +18,20 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_abstract_mappings_accept_known_concrete_implementations(self):
+        namespace = {'typing': typing}
+        for annotation in ('typing.Mapping[str, int]', 'typing.MutableMapping[str, int]'):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                self.assertEqual(contract.schema()['type'], 'object')
+                for value in (dict(x=1), OrderedDict(x=1),
+                              defaultdict(int, x=1), Counter(x=1)):
+                    contract.validate(value)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(OrderedDict(x='wrong'))
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('dict[str, int]', {}).validate(OrderedDict(x=1))
+
     def test_io_annotations_use_standard_stream_classes(self):
         text = io.StringIO('alpha')
         binary = io.BytesIO(b'beta')
