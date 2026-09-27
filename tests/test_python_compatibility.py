@@ -903,6 +903,33 @@ class Example(metaclass=Meta):
         captured = __class__
 print(captured is Example)
 ''',
+            'private attribute writes in nested classes': '''class Box:
+    class Descriptor:
+        def __init__(self, getter): self.__getter = getter
+        def __get__(self, owner, kind=None): return self.__getter(owner)
+    def __init__(self): self.__value: int = 3
+    def read(self): return self.__value
+    value = Descriptor(read)
+box = Box()
+print(box.value, box.read(), sorted(vars(box)))
+''',
+            'custom instance dict descriptors': '''import sys
+calls = []
+class Box:
+    value: int
+    def __init__(self): self.value = 3
+    @property
+    def __dict__(self):
+        calls.append('dict property')
+        return 'not a dict'
+box = Box()
+print(box.value, calls)
+class Module(type(sys)):
+    __dict__ = property(lambda self: 'not a dict')
+module = Module('example')
+try: dir(module)
+except TypeError: print('TypeError')
+''',
             'class locals': '''class Example:
     snapshot = sorted(locals())
 print(Example.snapshot)

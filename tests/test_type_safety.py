@@ -63,6 +63,18 @@ Box.__annotations__ = {'value': int}
 answer = 1
 ''')
 
+    def test_custom_dict_descriptor_does_not_hide_invalid_fields(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box:
+    value: int
+    def __init__(self): self.value = 3
+    @property
+    def __dict__(self): return 'not a dict'
+box = Box()
+object.__setattr__(box, 'value', 'wrong')
+answer = 1
+''')
+
     def test_function_attribute_annotation_checks_after_target_lookup(self):
         with self.assertRaises(TypeViolation):
             self.run_source('''class Box:

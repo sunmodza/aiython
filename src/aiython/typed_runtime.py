@@ -408,11 +408,16 @@ class TypeRuntime:
         cls = type(candidate)
         if cls in classes:
             self._validate_instance(candidate, cls.__qualname__, frame)
-            try:
-                state = object.__getattribute__(candidate, '__dict__')
-            except AttributeError:
-                state = {}
-            self._check_instances(state, classes, seen, frame)
+            for base in cls.__mro__:
+                descriptor = vars(base).get('__dict__')
+                if type(descriptor) in (types.GetSetDescriptorType, types.MemberDescriptorType):
+                    try:
+                        state = descriptor.__get__(candidate, cls)
+                    except AttributeError:
+                        break
+                    if type(state) is dict:
+                        self._check_instances(state, classes, seen, frame)
+                    break
         elif cls in (list, tuple, set, frozenset):
             for item in candidate:
                 self._check_instances(item, classes, seen, frame)
@@ -426,8 +431,11 @@ class TypeRuntime:
         # Inspect this at each checkpoint so annotations added later still count.
         for base in cls.__mro__:
             members = vars(base)
-            if (members.get('__annotations__') or members.get('__annotations_cache__')
-                    or members.get('__annotate_func__') or '__annotate__' in members):
+            annotation = members.get('__annotations__')
+            cache = members.get('__annotations_cache__')
+            if ((type(annotation) is dict and annotation) or
+                    (type(cache) is dict and cache) or
+                    callable(members.get('__annotate_func__'))):
                 return True
         return False
 
@@ -611,9 +619,17 @@ class TypedTransformer(ast.NodeTransformer):
         self.declarations = {}
         self.function = False
         self.delegation_contract = False
+        self.class_name = None
 
     def helper(self, name, *args):
         return helper(name, *args, runtime_name=self.runtime_name)
+
+    def attribute_name(self, name):
+        if self.class_name is not None and name.startswith('__') and not name.endswith('__'):
+            prefix = self.class_name.lstrip('_')
+            if prefix:
+                return f'_{prefix}{name}'
+        return name
 
     @staticmethod
     def declarations_in(body):
@@ -737,8 +753,10 @@ class TypedTransformer(ast.NodeTransformer):
         node.decorator_list.insert(0, ast.copy_location(register, first))
         previous = self.function
         previous_contract = self.delegation_contract
+        previous_class = self.class_name
         self.function = False
         self.delegation_contract = False
+        self.class_name = node.name
         body = self.body(node.body)
         header = body[:1] if isinstance(body[0],ast.Expr) and isinstance(body[0].value,ast.Constant) and isinstance(body[0].value.value,str) else []
         enter, *statements = body[len(header):]
@@ -751,6 +769,7 @@ class TypedTransformer(ast.NodeTransformer):
             node.body = header + [enter, exit_call]
         self.function = previous
         self.delegation_contract = previous_contract
+        self.class_name = previous_class
         return node
 
     def visit_Lambda(self,node):
@@ -789,7 +808,7 @@ class TypedTransformer(ast.NodeTransformer):
                               'assign_attribute', ast.Load()), [], [
                     ast.keyword(arg='value', value=self.visit(node.value)),
                     ast.keyword(arg='owner', value=self.visit(node.target.value)),
-                    ast.keyword(arg='name', value=ast.Constant(node.target.attr)),
+                    ast.keyword(arg='name', value=ast.Constant(self.attribute_name(node.target.attr))),
                     ast.keyword(arg='annotation', value=ast.Constant(annotation)),
                 ])
             return ast.copy_location(ast.Expr(assignment), node)
@@ -807,7 +826,7 @@ class TypedTransformer(ast.NodeTransformer):
                               'assign_attribute',ast.Load()), [], [
                     ast.keyword(arg='value',value=node.value),
                     ast.keyword(arg='owner',value=self.visit(target.value)),
-                    ast.keyword(arg='name',value=ast.Constant(target.attr)),
+                    ast.keyword(arg='name',value=ast.Constant(self.attribute_name(target.attr))),
                 ])
             return ast.copy_location(ast.Expr(assign),node)
         for target in node.targets:
