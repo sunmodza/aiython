@@ -338,6 +338,7 @@ class TypedTransformer(ast.NodeTransformer):
         self.snippet = snippet
         self.declarations = {}
         self.function = False
+        self.delegation_contract = False
 
     @staticmethod
     def declarations_in(body):
@@ -399,6 +400,7 @@ class TypedTransformer(ast.NodeTransformer):
 
     def visit_FunctionDef(self,node):
         previous = self.function
+        previous_contract = self.delegation_contract
         parent_declarations = dict(self.declarations) if previous else {}
         self.function = True
         parameters = {}
@@ -407,6 +409,7 @@ class TypedTransformer(ast.NodeTransformer):
         for arg, mode in ((node.args.vararg,'args'),(node.args.kwarg,'kwargs')):
             if arg and arg.annotation: parameters[arg.arg] = (ast.unparse(arg.annotation),mode)
         returns = ast.unparse(node.returns) if node.returns else None
+        self.delegation_contract = returns is not None
         # Generator annotations require yield/send checks, not return-only checks.
         is_generator = any(isinstance(n,(ast.Yield,ast.YieldFrom)) for n in self.function_nodes(node))
         used = {n.id for n in self.function_nodes(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Load)}
@@ -420,7 +423,7 @@ class TypedTransformer(ast.NodeTransformer):
         else:
             node.body.append(ast.copy_location(ast.Return(helper('returned',ast.Constant(None))),node))
         initial = next(i for i,n in enumerate(node.body) if getattr(n,'_aiython_scope_initializer',False))
-        handler = ast.ExceptHandler(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'error_type',ast.Load()),None,
+        handler = ast.ExceptHandler(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'scope_error_type',ast.Load()),None,
                                     [ast.Expr(helper('aborted')),ast.Raise()])
         final = ast.Expr(helper('leaving'))
         final = ast.Try([final],[],[],[ast.Expr(helper('exit_generator_scope' if is_generator else 'exit_scope'))])
@@ -429,6 +432,7 @@ class TypedTransformer(ast.NodeTransformer):
         ast.copy_location(guarded,node)
         node.body = node.body[:initial+1] + [guarded]
         self.function = previous
+        self.delegation_contract = previous_contract
         return node
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -443,7 +447,9 @@ class TypedTransformer(ast.NodeTransformer):
     def visit_ClassDef(self,node):
         node.decorator_list.insert(0, ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),'register_class',ast.Load()))
         previous = self.function
+        previous_contract = self.delegation_contract
         self.function = False
+        self.delegation_contract = False
         body = self.body(node.body)
         header = body[:1] if isinstance(body[0],ast.Expr) and isinstance(body[0].value,ast.Constant) and isinstance(body[0].value.value,str) else []
         enter, *statements = body[len(header):]
@@ -455,6 +461,14 @@ class TypedTransformer(ast.NodeTransformer):
         else:
             node.body = header + [enter, exit_call]
         self.function = previous
+        self.delegation_contract = previous_contract
+        return node
+
+    def visit_Lambda(self,node):
+        previous_contract = self.delegation_contract
+        self.delegation_contract = False
+        node = self.generic_visit(node)
+        self.delegation_contract = previous_contract
         return node
 
     def visit_Return(self,node):
@@ -469,7 +483,9 @@ class TypedTransformer(ast.NodeTransformer):
         return ast.copy_location(helper('sent',node),node)
 
     def visit_YieldFrom(self,node):
-        node.value = helper('delegate',self.visit(node.value))
+        node.value = self.visit(node.value)
+        if self.delegation_contract:
+            node.value = helper('delegate',node.value)
         return node
 
     def visit_AnnAssign(self,node):

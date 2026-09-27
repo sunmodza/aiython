@@ -734,6 +734,46 @@ print(next(item))
 try: item.send(7)
 except StopIteration: pass
 ''',
+            'generator delegation identity': '''from collections.abc import Generator
+def child():
+    received = yield 1
+    return received
+def plain():
+    yield from child()
+def typed() -> Generator[int, None, None]:
+    def nested():
+        yield from child()
+    nested_gen = nested()
+    print(next(nested_gen), nested_gen.gi_yieldfrom.gi_code.co_name)
+    nested_gen.close()
+    through_lambda = lambda: (yield from child())
+    lambda_gen = through_lambda()
+    print(next(lambda_gen), lambda_gen.gi_yieldfrom.gi_code.co_name)
+    lambda_gen.close()
+    class Local:
+        def method(self):
+            yield from child()
+    method_gen = Local().method()
+    print(next(method_gen), method_gen.gi_yieldfrom.gi_code.co_name)
+    method_gen.close()
+    yield from child()
+plain_gen = plain()
+print(next(plain_gen), plain_gen.gi_yieldfrom.gi_code.co_name)
+plain_gen.close()
+typed_gen = typed()
+print(next(typed_gen))
+typed_gen.close()
+''',
+            'generator shutdown delegation': '''from collections.abc import Generator
+def generate():
+    yield from [1, 2]
+item = generate()
+next(item)
+def typed() -> Generator[int, None, None]:
+    yield from [1, 2]
+typed_item = typed()
+next(typed_item)
+''',
             'generator locals': '''import inspect
 def generate(value):
     yield sorted(locals())

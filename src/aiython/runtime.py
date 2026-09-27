@@ -653,7 +653,9 @@ class NestedCheckpoints(ast.NodeTransformer):
 
 
 class Runtime:
-    error_type = BaseException
+    # Recovery handles ordinary failures; scope cleanup also sees control signals.
+    error_type = Exception
+    scope_error_type = BaseException
 
     @staticmethod
     def current_exception():
