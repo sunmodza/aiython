@@ -1086,6 +1086,14 @@ first: TupleAlias[int, str] = (1, 'x')
 second: Mixed[int, str, bool] = (1, 'x', True)
 print(first, second)
 '''
+        if sys.version_info >= (3, 13):
+            cases['defaulted type aliases'] = '''type Pair[T, U = str] = tuple[T, U]
+type Variadic[T, *Ts, U = str] = tuple[T, *Ts, U]
+first: Pair[int] = (1, 'x')
+second: Variadic[int] = (1, 'x')
+third: Variadic[int, bool, str] = (1, True, 'x')
+print(first, second, third)
+'''
         if sys.version_info >= (3, 14):
             cases['template string interpolation'] = '''events = []
 def pick():

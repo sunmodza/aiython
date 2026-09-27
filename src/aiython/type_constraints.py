@@ -353,17 +353,36 @@ class Compiler:
             if variadic:
                 pivot = variadic[0]
                 suffix = len(parameters) - pivot - 1
-                if len(args) < len(parameters) - 1:
+                no_default = getattr(typing, 'NoDefault', None)
+                suffix_parameters = parameters[pivot + 1:]
+                required_suffix = sum(getattr(parameter, '__default__', no_default) is no_default
+                                      for parameter in suffix_parameters)
+                if len(args) < pivot + required_suffix:
                     raise UnsupportedType('Generic alias requires its type arguments')
                 bindings = {parameter.__name__: arg
                             for parameter, arg in zip(parameters[:pivot], args[:pivot])}
-                bindings[parameters[pivot].__name__] = args[pivot:len(args) - suffix]
+                supplied_suffix = min(suffix, len(args) - pivot)
+                middle_end = len(args) - supplied_suffix
+                bindings[parameters[pivot].__name__] = args[pivot:middle_end]
                 bindings.update({parameter.__name__: arg for parameter, arg in
-                                 zip(parameters[pivot + 1:], args[len(args) - suffix:])})
+                                 zip(suffix_parameters, args[middle_end:])})
+                for parameter in suffix_parameters[supplied_suffix:]:
+                    default = getattr(parameter, '__default__', no_default)
+                    if default is no_default:
+                        raise UnsupportedType('Generic alias requires its type arguments')
+                    bindings[parameter.__name__] = self.compile(
+                        default, self.module_names(alias,names) | bindings)
             else:
-                if len(args) != len(parameters):
+                if len(args) > len(parameters):
                     raise UnsupportedType('Generic alias requires its type arguments')
                 bindings = {parameter.__name__: arg for parameter, arg in zip(parameters,args)}
+                no_default = getattr(typing, 'NoDefault', None)
+                for parameter in parameters[len(args):]:
+                    default = getattr(parameter, '__default__', no_default)
+                    if default is no_default:
+                        raise UnsupportedType('Generic alias requires its type arguments')
+                    bindings[parameter.__name__] = self.compile(
+                        default, self.module_names(alias,names) | bindings)
         scope = self.module_names(alias,names) | bindings
         key = (id(alias), tuple(id(a) for a in args), label is None)
         if key in self.cache:

@@ -14,6 +14,26 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    @unittest.skipIf(sys.version_info < (3, 13), 'type parameter defaults require Python 3.13')
+    def test_defaulted_type_alias_parameters(self):
+        namespace = {'__name__': __name__}
+        exec('type Pair[T, U = str] = tuple[T, U]\n'
+             'type Again[T, U = T] = tuple[T, U]\n'
+             'type Variadic[T, *Ts, U = str] = tuple[T, *Ts, U]\n', namespace)
+        pair = tc.compile_contract('Pair[int]', namespace)
+        pair.validate((1, 'x'))
+        with self.assertRaises(tc.TypeViolation):
+            pair.validate((1, 2))
+        again = tc.compile_contract('Again[int]', namespace)
+        again.validate((1, 2))
+        with self.assertRaises(tc.TypeViolation):
+            again.validate((1, 'x'))
+        for annotation, value in (('Variadic[int]', (1, 'x')),
+                                  ('Variadic[int, bool]', (1, True)),
+                                  ('Variadic[int, bool, str]', (1, True, 'x'))):
+            with self.subTest(annotation=annotation):
+                tc.compile_contract(annotation, namespace).validate(value)
+
     @unittest.skipIf(sys.version_info < (3, 12), 'type statements require Python 3.12')
     def test_variadic_type_alias_specialization(self):
         namespace = {'__name__': __name__}
