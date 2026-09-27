@@ -336,54 +336,56 @@ class Compiler:
         if isinstance(base,TYPE_ALIAS_TYPES): return self.alias(base,names,args,label)
         if isinstance(base,type) and (getattr(base,'__type_params__',()) or getattr(base,'__parameters__',())):
             parameters = getattr(base,'__type_params__',()) or base.__parameters__
-            if len(parameters) != len(args):
-                raise UnsupportedType('Generic type argument count mismatch')
-            return self.class_contract(base,names | {p.__name__: a for p,a in zip(parameters,args)},label)
+            scope = self.module_names(base,names)
+            bindings = self.parameter_bindings(parameters, args, scope,
+                                               'Generic type argument count mismatch')
+            return self.class_contract(base,scope | bindings,label)
         raise UnsupportedType(f'Unsupported generic output type: {label}; no unchecked fallback is allowed')
+
+    def parameter_bindings(self, parameters, args, names, error):
+        variadic = [index for index, parameter in enumerate(parameters)
+                    if isinstance(parameter, typing.TypeVarTuple)]
+        if len(variadic) > 1:
+            raise UnsupportedType('Only one TypeVarTuple can be specialized')
+        no_default = getattr(typing, 'NoDefault', None)
+        if variadic:
+            pivot = variadic[0]
+            suffix_parameters = parameters[pivot + 1:]
+            required_suffix = sum(getattr(parameter, '__default__', no_default) is no_default
+                                  for parameter in suffix_parameters)
+            if len(args) < pivot + required_suffix:
+                raise UnsupportedType(error)
+            bindings = {parameter.__name__: arg
+                        for parameter, arg in zip(parameters[:pivot], args[:pivot])}
+            supplied_suffix = min(len(suffix_parameters), len(args) - pivot)
+            middle_end = len(args) - supplied_suffix
+            bindings[parameters[pivot].__name__] = args[pivot:middle_end]
+            bindings.update({parameter.__name__: arg for parameter, arg in
+                             zip(suffix_parameters, args[middle_end:])})
+            for parameter in suffix_parameters[supplied_suffix:]:
+                default = getattr(parameter, '__default__', no_default)
+                if default is no_default:
+                    raise UnsupportedType(error)
+                bindings[parameter.__name__] = self.compile(default, names | bindings)
+            return bindings
+        if len(args) > len(parameters):
+            raise UnsupportedType(error)
+        bindings = {parameter.__name__: arg for parameter, arg in zip(parameters,args)}
+        for parameter in parameters[len(args):]:
+            default = getattr(parameter, '__default__', no_default)
+            if default is no_default:
+                raise UnsupportedType(error)
+            bindings[parameter.__name__] = self.compile(default, names | bindings)
+        return bindings
 
     def alias(self,alias,names,args=(),label=None):
         parameters = alias.__type_params__
-        if not args and label is None:
-            bindings = {parameter.__name__: parameter for parameter in parameters}
-        else:
-            variadic = [index for index, parameter in enumerate(parameters)
-                        if isinstance(parameter, typing.TypeVarTuple)]
-            if len(variadic) > 1:
-                raise UnsupportedType('Only one TypeVarTuple can be specialized')
-            if variadic:
-                pivot = variadic[0]
-                suffix = len(parameters) - pivot - 1
-                no_default = getattr(typing, 'NoDefault', None)
-                suffix_parameters = parameters[pivot + 1:]
-                required_suffix = sum(getattr(parameter, '__default__', no_default) is no_default
-                                      for parameter in suffix_parameters)
-                if len(args) < pivot + required_suffix:
-                    raise UnsupportedType('Generic alias requires its type arguments')
-                bindings = {parameter.__name__: arg
-                            for parameter, arg in zip(parameters[:pivot], args[:pivot])}
-                supplied_suffix = min(suffix, len(args) - pivot)
-                middle_end = len(args) - supplied_suffix
-                bindings[parameters[pivot].__name__] = args[pivot:middle_end]
-                bindings.update({parameter.__name__: arg for parameter, arg in
-                                 zip(suffix_parameters, args[middle_end:])})
-                for parameter in suffix_parameters[supplied_suffix:]:
-                    default = getattr(parameter, '__default__', no_default)
-                    if default is no_default:
-                        raise UnsupportedType('Generic alias requires its type arguments')
-                    bindings[parameter.__name__] = self.compile(
-                        default, self.module_names(alias,names) | bindings)
-            else:
-                if len(args) > len(parameters):
-                    raise UnsupportedType('Generic alias requires its type arguments')
-                bindings = {parameter.__name__: arg for parameter, arg in zip(parameters,args)}
-                no_default = getattr(typing, 'NoDefault', None)
-                for parameter in parameters[len(args):]:
-                    default = getattr(parameter, '__default__', no_default)
-                    if default is no_default:
-                        raise UnsupportedType('Generic alias requires its type arguments')
-                    bindings[parameter.__name__] = self.compile(
-                        default, self.module_names(alias,names) | bindings)
-        scope = self.module_names(alias,names) | bindings
+        scope = self.module_names(alias,names)
+        bindings = ({parameter.__name__: parameter for parameter in parameters}
+                    if not args and label is None else
+                    self.parameter_bindings(parameters, args, scope,
+                                            'Generic alias requires its type arguments'))
+        scope |= bindings
         key = (id(alias), tuple(id(a) for a in args), label is None)
         if key in self.cache:
             return self.cache[key]
@@ -415,7 +417,9 @@ class Compiler:
         scope = self.module_names(target,names) | {target.__name__:target}
         scope.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
         # isinstance can call a user's __getattribute__('__class__') here.
-        scope.update({k:v for k,v in names.items() if issubclass(type(v), Contract)})
+        scope.update({k:v for k,v in names.items()
+                      if (issubclass(type(v), Contract) or
+                          (type(v) is tuple and all(issubclass(type(item), Contract) for item in v)))})
         fields = {}
         for base in reversed(target.__mro__):
             if base in (object,dict): continue

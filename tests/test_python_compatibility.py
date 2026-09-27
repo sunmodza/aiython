@@ -1086,6 +1086,12 @@ first: TupleAlias[int, str] = (1, 'x')
 second: Mixed[int, str, bool] = (1, 'x', True)
 print(first, second)
 '''
+            cases['variadic generic class'] = '''class Box[*Ts]:
+    value: tuple[*Ts]
+    def __init__(self, value: tuple[*Ts]): self.value = value
+box: Box[int, str] = Box((1, 'x'))
+print(box.value)
+'''
         if sys.version_info >= (3, 13):
             cases['defaulted type aliases'] = '''type Pair[T, U = str] = tuple[T, U]
 type Variadic[T, *Ts, U = str] = tuple[T, *Ts, U]
@@ -1093,6 +1099,14 @@ first: Pair[int] = (1, 'x')
 second: Variadic[int] = (1, 'x')
 third: Variadic[int, bool, str] = (1, True, 'x')
 print(first, second, third)
+'''
+            cases['defaulted generic class'] = '''class Pair[T, U = str]:
+    left: T
+    right: U
+    def __init__(self, left: T, right: U):
+        self.left, self.right = left, right
+pair: Pair[int] = Pair(1, 'x')
+print(pair.left, pair.right)
 '''
         if sys.version_info >= (3, 14):
             cases['template string interpolation'] = '''events = []

@@ -14,6 +14,17 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    @unittest.skipIf(sys.version_info < (3, 12), 'generic class syntax requires Python 3.12')
+    def test_variadic_generic_class_specialization(self):
+        namespace = {'__name__': __name__}
+        exec('class Box[*Ts]:\n'
+             '    value: tuple[*Ts]\n'
+             '    def __init__(self, value): self.value = value\n', namespace)
+        contract = tc.compile_contract('Box[int, str]', namespace)
+        contract.validate(namespace['Box']((1, 'x')))
+        with self.assertRaises(tc.TypeViolation):
+            contract.validate(namespace['Box']((1, 2)))
+
     @unittest.skipIf(sys.version_info < (3, 13), 'type parameter defaults require Python 3.13')
     def test_defaulted_type_alias_parameters(self):
         namespace = {'__name__': __name__}
@@ -33,6 +44,19 @@ class ContractEdgeTests(unittest.TestCase):
                                   ('Variadic[int, bool, str]', (1, True, 'x'))):
             with self.subTest(annotation=annotation):
                 tc.compile_contract(annotation, namespace).validate(value)
+
+    @unittest.skipIf(sys.version_info < (3, 13), 'type parameter defaults require Python 3.13')
+    def test_defaulted_generic_class_parameters(self):
+        namespace = {'__name__': __name__}
+        exec('class Pair[T, U = str]:\n'
+             '    left: T\n'
+             '    right: U\n'
+             '    def __init__(self, left, right):\n'
+             '        self.left, self.right = left, right\n', namespace)
+        contract = tc.compile_contract('Pair[int]', namespace)
+        contract.validate(namespace['Pair'](1, 'x'))
+        with self.assertRaises(tc.TypeViolation):
+            contract.validate(namespace['Pair'](1, 2))
 
     @unittest.skipIf(sys.version_info < (3, 12), 'type statements require Python 3.12')
     def test_variadic_type_alias_specialization(self):
