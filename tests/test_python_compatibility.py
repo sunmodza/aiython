@@ -1130,6 +1130,16 @@ bare_tuple: Tuple = (1, 'x')
 view: Sequence[int] = memoryview(b'A')
 print(count({1: 'one'}), extend(bytearray(b'A')), size(frozenset({'x'})), bare, bare_tuple, list(view))
 ''',
+            'hashable and sized annotations': '''from typing import Hashable, Sized
+def describe(key: Hashable, values: Sized) -> tuple[int, int]:
+    return hash(key), len(values)
+print(describe(3, [1, 2]))
+''',
+            'chain map annotation': '''from collections import ChainMap
+from typing import ChainMap as TypedChainMap
+layers: TypedChainMap[str, int] = ChainMap({'x': 1}, {'y': 2})
+print(layers['x'], layers['y'], len(layers.maps))
+''',
         }
         if sys.version_info >= (3, 12):
             cases['generic variadic parameters'] = '''def collect[*Ts](*args: *Ts) -> tuple[*Ts]: return args

@@ -1,5 +1,5 @@
 import ast
-from collections import Counter, OrderedDict, defaultdict, deque
+from collections import ChainMap, Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 import enum
 import io
@@ -18,6 +18,30 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_chainmap_checks_every_underlying_mapping(self):
+        namespace = {'ChainMap': ChainMap, 'typing': typing}
+        for annotation in ('ChainMap[str, int]', 'typing.ChainMap[str, int]'):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, namespace)
+                self.assertEqual(contract.schema()['type'], 'object')
+                contract.validate(ChainMap({'x': 1}, {'y': 2}))
+                with self.assertRaisesRegex(tc.TypeViolation, r'maps\[1\]'):
+                    contract.validate(ChainMap({'x': 1}, {'x': 'hidden wrong value'}))
+        tc.compile_contract('typing.ChainMap', namespace).validate(
+            ChainMap({'x': 1}, {2: 'other'}))
+
+    def test_nominal_abstract_annotations_without_members(self):
+        for annotation, valid, invalid in (
+            ('typing.Hashable', 3, []),
+            ('typing.Sized', [1], 3),
+        ):
+            with self.subTest(annotation=annotation):
+                contract = tc.compile_contract(annotation, {'typing': typing})
+                self.assertIn('x-python-abc', contract.schema())
+                contract.validate(valid)
+                with self.assertRaises(tc.TypeViolation):
+                    contract.validate(invalid)
+
     def test_abstract_collections_check_known_concrete_values(self):
         namespace = {'typing': typing}
         cases = (

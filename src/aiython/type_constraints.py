@@ -8,7 +8,7 @@ from __future__ import annotations
 import ast
 import builtins
 import collections.abc as abc
-from collections import Counter, OrderedDict, defaultdict, deque
+from collections import ChainMap, Counter, OrderedDict, defaultdict, deque
 from dataclasses import dataclass, field
 import dataclasses
 import enum
@@ -45,7 +45,7 @@ SAFE_COLLECTION_TYPES = (list, tuple, set, frozenset, dict, str, bytes,
                          deque, defaultdict, OrderedDict, Counter)
 CONTAINER_KINDS = {list:'list', set:'set', frozenset:'frozenset', dict:'dict',
                    deque:'deque', defaultdict:'defaultdict', OrderedDict:'ordered_dict',
-                   Counter:'counter', abc.Sequence:'sequence', abc.Mapping:'mapping',
+                   Counter:'counter', ChainMap:'chainmap', abc.Sequence:'sequence', abc.Mapping:'mapping',
                    abc.MutableMapping:'mutable_mapping', abc.MutableSequence:'mutable_sequence',
                    abc.Set:'abstract_set', abc.MutableSet:'mutable_set', abc.Collection:'collection'}
 
@@ -102,6 +102,7 @@ class Contract:
             if members: result['x-python-enum-members'] = members
         elif kind == 'null': result = {'type': 'null'}
         elif kind == 'callable': result = {'x-python-callable': True}
+        elif kind == 'abc': result = {'x-python-abc': self.name}
         elif kind == 'io':
             result = {'x-python-io': self.args[0].name}
         elif kind in ('pattern', 'match'):
@@ -122,7 +123,7 @@ class Contract:
                       'prefixItems': [item.schema(seen) for item in self.args[:pivot]],
                       'x-python-suffixItems': [item.schema(seen) for item in self.args[pivot + 1:]]}
         elif kind == 'tuple_many': result = {'type':'array', 'items':self.args[0].schema(seen)}
-        elif kind in ('dict', 'mapping', 'mutable_mapping', 'defaultdict', 'ordered_dict', 'counter'):
+        elif kind in ('dict', 'mapping', 'mutable_mapping', 'defaultdict', 'ordered_dict', 'counter', 'chainmap'):
             result = {'type':'object', 'additionalProperties':self.args[1].schema(seen), 'x-key-schema':self.args[0].schema(seen)}
         elif kind == 'class' and isinstance(self.python_type,type) and issubclass(self.python_type,enum.Enum):
             values = [v.value for v in self.python_type]
@@ -175,6 +176,8 @@ class Contract:
             fail()
         elif kind == 'literal':
             if not any(type(value) is type(v) and value == v for v in self.args): fail('not an allowed literal')
+        elif kind == 'abc':
+            if not issubclass(type(value), self.python_type): fail()
         elif kind == 'io':
             target = self.args[0]
             if not issubclass(type(value), io.IOBase): fail()
@@ -234,6 +237,16 @@ class Contract:
             for index, (key,item) in enumerate(value.items()):
                 child(self.args[0],key,f'.keys[{index}]')
                 child(self.args[1],item,f'[{key!r}]' if type(key) in (str,int) else f'.values[{index}]')
+        elif kind == 'chainmap':
+            if type(value) is not ChainMap: fail()
+            if type(value.maps) not in (list, tuple): fail('ChainMap maps must be concrete')
+            for map_index, mapping in enumerate(value.maps):
+                if type(mapping) not in SAFE_MAPPING_TYPES:
+                    fail('only concrete ChainMap members can be checked deeply')
+                for index, (key, item) in enumerate(mapping.items()):
+                    child(self.args[0], key, f'.maps[{map_index}].keys[{index}]')
+                    child(self.args[1], item, f'.maps[{map_index}][{key!r}]'
+                          if type(key) in (str,int) else f'.maps[{map_index}].values[{index}]')
         elif kind == 'typeddict':
             if type(value) is not dict: fail()
             missing = self.required - value.keys()
@@ -343,6 +356,10 @@ class Compiler:
             return args[0]
         if origin is abc.Callable:
             return Contract('callable',label)
+        if origin in (abc.Hashable, abc.Sized):
+            if args:
+                raise UnsupportedType(f'{label}: this ABC does not take type arguments')
+            return Contract('abc', label, python_type=origin)
         if origin is typing.IO:
             if len(args) != 1:
                 raise UnsupportedType('IO requires one stream type')
@@ -364,7 +381,7 @@ class Compiler:
                 raise UnsupportedType('Qualifier requires one type')
             return Contract('qualifier',label,args,qualifier=base._name)
         if origin in CONTAINER_KINDS:
-            expected = 2 if origin in (dict,abc.Mapping,abc.MutableMapping,defaultdict,OrderedDict) else 1
+            expected = 2 if origin in (dict,abc.Mapping,abc.MutableMapping,defaultdict,OrderedDict,ChainMap) else 1
             if not args:
                 args = (Contract('any', 'Any'),) * expected
             if len(args) != expected:
