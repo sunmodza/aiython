@@ -825,16 +825,16 @@ class Runtime:
         return self.frame_sources.get(key, self.frame_sources.get(
             (code.co_filename, 1, "<module>"), {"available": False, "filename": code.co_filename}))
 
-    def prepare(self, unit: Unit, *, entry: bool = False):
+    def prepare(self, unit: Unit, *, entry: bool = False, flags: int = 0):
         started = perf_counter()
         try:
             with self._lock:
-                return self._prepare(unit, entry=entry)
+                return self._prepare(unit, entry=entry, flags=flags)
         finally:
             if self.stats.enabled:
                 self.stats.prepare_seconds += perf_counter() - started
 
-    def _prepare(self, unit: Unit, *, entry: bool = False):
+    def _prepare(self, unit: Unit, *, entry: bool = False, flags: int = 0):
         self.register(unit)
         self.blocks.update({key: (unit, block) for key, block in unit.blocks.items()})
         linecache.cache[unit.filename] = (len(unit.source), None, unit.source.splitlines(True), unit.filename)
@@ -878,7 +878,7 @@ class Runtime:
         ast.fix_missing_locations(tree)
         tree = RuntimeReferences(unit.runtime_name).visit(tree)
         ast.fix_missing_locations(tree)
-        return compile(tree, unit.filename, "exec", dont_inherit=True)
+        return compile(tree, unit.filename, "exec", flags=flags, dont_inherit=True)
 
     def lookup(self, name: str):
         frame = inspect.currentframe().f_back

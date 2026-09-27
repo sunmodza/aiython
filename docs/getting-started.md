@@ -54,6 +54,8 @@ aiython tickets.py
 
 `--explain` shows the AI boundary without executing the script or contacting a provider. Running the script uses your chosen provider and may incur charges. For a uv project, prefix both commands with `uv run`.
 
+Run `aiython` without arguments in a terminal for an interactive console. It keeps variables, type annotations, and future imports between commands, and accepts AI expressions. Piped input runs as a Python script, with or without an explicit `-` argument.
+
 ## Next steps
 
 - Try the [small examples](examples.md) to see one behavior at a time.

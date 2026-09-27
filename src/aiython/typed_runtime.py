@@ -5,6 +5,7 @@ import ast
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import inspect
+import sys
 import threading
 import types
 import typing
@@ -76,6 +77,12 @@ class TypeRuntime:
         self.method_owners = weakref.WeakKeyDictionary()
         self._classes_lock = threading.RLock()
         self._contract_cache = threading.local()
+        self.interactive_globals = None
+        self.interactive_scope = None
+
+    @staticmethod
+    def display(value):
+        sys.displayhook(value)
 
     def contract(self, annotation, namespace):
         cache = getattr(self._contract_cache, 'value', None)
@@ -153,7 +160,12 @@ class TypeRuntime:
             if any(source and ('Self' in source or namespace.get(source) is typing.Self)
                    for source in sources):
                 owner = self.method_self_owner(frame, discover=True)
-        scope = Scope(declarations=declarations, self_owner=owner)
+        if (frame.f_code.co_name == '<module>' and frame.f_globals is self.interactive_globals
+                and self.interactive_scope is not None):
+            scope = self.interactive_scope
+            scope.declarations.update(declarations)
+        else:
+            scope = Scope(declarations=declarations, self_owner=owner)
         if scope.self_owner is not None:
             namespace[SELF_OWNER] = scope.self_owner
         for name, (source, mode) in (parameters or {}).items():

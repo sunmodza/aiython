@@ -306,6 +306,47 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                 module.__dict__.pop("__cached__", None)
 
 
+def run_repl(*, restore_state=False):
+    from .repl import AiythonConsole
+    from .typed_runtime import Scope
+
+    config = resolve(Path.cwd() / '__main__.py')
+    runtime = Runtime(config)
+    module = types.ModuleType('__main__')
+    module.__dict__.update({'__package__': None, '__spec__': None,
+                            '__loader__': importlib.machinery.BuiltinImporter,
+                            '__builtins__': builtins})
+    runtime.types.interactive_globals = module.__dict__
+    runtime.types.interactive_scope = Scope()
+    console = AiythonConsole(runtime, module.__dict__)
+    finder = ProjectFinder(runtime)
+    old_main = sys.modules.get('__main__')
+    old_argv, old_orig_argv, old_path = sys.argv, sys.orig_argv, sys.path[:]
+    if not restore_state:
+        atexit.register(runtime.capabilities.close)
+    try:
+        sys.modules['__main__'] = module
+        sys.argv = ['']
+        sys.orig_argv = interpreter_arguments()
+        if not sys.flags.safe_path:
+            sys.path[:1] = ['']
+        sys.meta_path.insert(0, finder)
+        banner = ('' if sys.flags.quiet else
+                  f'Python {sys.version} on {sys.platform}\n'
+                  'Type "help", "copyright", "credits" or "license" for more information.')
+        console.interact(banner=banner, exitmsg='')
+        return module.__dict__
+    finally:
+        if restore_state:
+            sys.meta_path.remove(finder)
+            sys.argv, sys.orig_argv, sys.path[:] = old_argv, old_orig_argv, old_path
+            if old_main is None:
+                sys.modules.pop('__main__', None)
+            else:
+                sys.modules['__main__'] = old_main
+            runtime.capabilities.close()
+
+
 def parser():
     result = argparse.ArgumentParser(
         prog="aiython", description="Python with project-scoped AI execution",
@@ -336,7 +377,7 @@ def main(argv=None):
         implicit_stdin = not arguments and not sys.stdin.isatty()
         if not arguments:
             if not implicit_stdin:
-                parser().print_help()
+                run_repl(restore_state=argv is not None)
                 return
             arguments = ["-"]
         if arguments[:1] == ["setup"]:

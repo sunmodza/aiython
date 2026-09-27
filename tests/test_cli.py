@@ -15,21 +15,49 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 from aiython.config import CAPABILITIES, credential, resolve
-from aiython.cli import main
+from aiython.cli import main, run_repl
 from aiython.models import ConfigError
 from aiython.setup import ModelChoice, _catalog, _choose_model, setup
 
 
 class CLITests(unittest.TestCase):
-    def test_cli_without_arguments_shows_first_run_help_on_terminal(self):
+    def test_cli_without_arguments_opens_repl_on_terminal(self):
         class Terminal(io.StringIO):
             def isatty(self):
                 return True
 
         output = io.StringIO()
-        with patch.object(sys, 'stdin', Terminal()), contextlib.redirect_stdout(output):
+        errors = io.StringIO()
+        original = (sys.argv, sys.orig_argv, sys.path[:], sys.modules['__main__'])
+        with patch.object(sys, 'stdin', Terminal('value: int = 2\nprint(value)\nvalue = 3\nprint(value)\n')), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             main([])
-        self.assertIn("aiython setup", output.getvalue())
+        self.assertIn('2\n', output.getvalue())
+        self.assertIn('3\n', output.getvalue())
+        self.assertIn('Python ', errors.getvalue())
+        self.assertIs(sys.argv, original[0])
+        self.assertIs(sys.orig_argv, original[1])
+        self.assertEqual(sys.path, original[2])
+        self.assertIs(sys.modules['__main__'], original[3])
+
+    def test_repl_main_module_metadata_matches_python(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        source = ('import sys\n'
+                  "snapshot = (__name__, __package__, __spec__, sys.argv[:], "
+                  "sys.orig_argv[:], '__file__' in globals(), sys.path[0])\n")
+        with patch.object(sys, 'stdin', Terminal(source)), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            namespace = run_repl(restore_state=True)
+        name, package, spec, argv, orig_argv, has_file, path = namespace['snapshot']
+        self.assertEqual((name, package, spec, argv, has_file),
+                         ('__main__', None, None, [''], False))
+        self.assertEqual(orig_argv[0], sys.executable)
+        if not sys.flags.safe_path:
+            self.assertEqual(path, '')
 
     def test_cli_version_uses_distribution_metadata(self):
         result = subprocess.run([sys.executable, "-m", "aiython", "--version"], capture_output=True, text=True)
