@@ -52,6 +52,26 @@ except ZeroDivisionError:
         self.assertEqual(result["__doc__"], "module doc")
         self.assertFalse(agent.requests or agent.errors)
 
+    def test_class_recovery_keeps_scope_outside_namespace(self):
+        agent = FakeAgent(recover=lambda request, runtime: RecoveryDecision('complete', 7, True))
+        result = self.run_source('''class Namespace(dict):
+    def __delitem__(self, key): raise TypeError('removal forbidden')
+class Meta(type):
+    @classmethod
+    def __prepare__(meta, name, bases): return Namespace()
+    def __new__(meta, name, bases, namespace):
+        assert not any(key.startswith('__aiython_') for key in namespace)
+        return super().__new__(meta, name, bases, namespace)
+class Example(metaclass=Meta):
+    values = []
+    for index in range(2):
+        value = missing
+        values.append(value)
+answer = Example.values
+''', agent)
+        self.assertEqual(result['answer'], [7, 7])
+        self.assertEqual([request.attempt for request in agent.errors], [1, 1])
+
     def test_grouped_statement_module_and_identity(self):
         def execute(request, runtime):
             self.assertEqual(request.related_objects["items"], [])

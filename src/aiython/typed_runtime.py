@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import inspect
 import threading
@@ -11,6 +12,12 @@ from .frontend import RUNTIME_NAME
 from .type_constraints import Contract, ContractCache, TypeViolation, compile_contract, annotations_of, Compiler
 
 SCOPE = '__aiython_type_scope__'
+_CLASS_SCOPES = ContextVar('aiython_class_scopes', default=())
+
+
+def class_scope(frame):
+    return next((scope for active, scope in reversed(_CLASS_SCOPES.get())
+                 if active is frame), None)
 
 
 @dataclass
@@ -54,31 +61,46 @@ class TypeRuntime:
     @staticmethod
     def namespace(frame):
         namespace = dict(frame.f_globals) | dict(frame.f_locals)
-        scope = frame.f_locals.get(SCOPE)
+        scope = class_scope(frame) or frame.f_locals.get(SCOPE)
         if isinstance(scope,Scope):
             namespace.update({parameter.__name__: bound for parameter,bound in scope.bindings.items()})
         return namespace
 
+    def _initialize(self, frame, declarations, parameters, returns):
+        scope = Scope(declarations=declarations)
+        namespace = self.namespace(frame)
+        for name, (source, mode) in (parameters or {}).items():
+            contract = self.contract(source,namespace)
+            if mode == 'args': contract = Contract('tuple_many',source,(contract,))
+            elif mode == 'kwargs': contract = Contract('dict',source,(compile_contract('str',namespace),contract))
+            contract.validate(frame.f_locals[name],name,bindings=scope.bindings)
+            scope.contracts[name] = contract
+        if returns:
+            scope.returned = self.contract(returns,namespace)
+        return scope
+
     def initialize(self, declarations, parameters=None, returns=None):
         frame = inspect.currentframe().f_back
         try:
-            scope = Scope(declarations=declarations)
-            namespace = self.namespace(frame)
-            for name, (source, mode) in (parameters or {}).items():
-                contract = self.contract(source,namespace)
-                if mode == 'args': contract = Contract('tuple_many',source,(contract,))
-                elif mode == 'kwargs': contract = Contract('dict',source,(compile_contract('str',namespace),contract))
-                contract.validate(frame.f_locals[name],name,bindings=scope.bindings)
-                scope.contracts[name] = contract
-            if returns:
-                scope.returned = self.contract(returns,namespace)
-            return scope
+            return self._initialize(frame, declarations, parameters, returns)
         finally:
             del frame
 
+    def enter_class_scope(self, declarations):
+        frame = inspect.currentframe().f_back
+        try:
+            scope = self._initialize(frame, declarations, None, None)
+            _CLASS_SCOPES.set(_CLASS_SCOPES.get() + ((frame, scope),))
+        finally:
+            del frame
+
+    def exit_class_scope(self):
+        stack = _CLASS_SCOPES.get()
+        _CLASS_SCOPES.set(stack[:-1])
+
     @staticmethod
     def scopes(frame):
-        local = frame.f_locals.get(SCOPE)
+        local = class_scope(frame) or frame.f_locals.get(SCOPE)
         global_scope = frame.f_globals.get(SCOPE)
         scopes = [(local,frame.f_locals)] if isinstance(local,Scope) else []
         if isinstance(global_scope,Scope) and global_scope is not local:
@@ -171,7 +193,7 @@ class TypeRuntime:
             # Active enclosing scopes can hold annotated aliases to mutated values.
             parent = frame.f_back
             while parent:
-                if SCOPE in parent.f_locals and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME):
+                if (class_scope(parent) or SCOPE in parent.f_locals) and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME):
                     self.check_frame(parent)
                 parent = parent.f_back
         finally: del frame
@@ -314,7 +336,7 @@ class TypedTransformer(ast.NodeTransformer):
         for statement in body: collect(statement)
         return result
 
-    def body(self,body,*,parameters=None,returns=None,initialize=True,inherited=None):
+    def body(self,body,*,parameters=None,returns=None,initialize=True,inherited=None,class_scope=False):
         previous = self.declarations
         self.declarations = dict(inherited or {}) | self.declarations_in(body)
         output = []
@@ -324,7 +346,8 @@ class TypedTransformer(ast.NodeTransformer):
         while body and isinstance(body[0],ast.ImportFrom) and body[0].module == '__future__':
             header.append(body[0]); body = body[1:]
         if initialize:
-            initial = ast.Assign([ast.Name(SCOPE,ast.Store())],helper('initialize',literal(self.declarations),literal(parameters),literal(returns)))
+            initial = (ast.Expr(helper('enter_class_scope',literal(self.declarations))) if class_scope else
+                       ast.Assign([ast.Name(SCOPE,ast.Store())],helper('initialize',literal(self.declarations),literal(parameters),literal(returns))))
             ast.copy_location(initial,body[0] if body else header[-1] if header else ast.Constant(None,lineno=1,col_offset=0))
             output.append(initial)
         # Capture lexical types used only in stringified contracts without executing them.
@@ -391,7 +414,13 @@ class TypedTransformer(ast.NodeTransformer):
         node.decorator_list.insert(0, ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),'register_class',ast.Load()))
         previous = self.function
         self.function = False
-        node.body = self.body(node.body)
+        body = self.body(node.body,class_scope=True)
+        header = body[:1] if isinstance(body[0],ast.Expr) and isinstance(body[0].value,ast.Constant) and isinstance(body[0].value.value,str) else []
+        enter, *statements = body[len(header):]
+        exit_call = ast.copy_location(ast.Expr(helper('exit_class_scope')), node)
+        guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), node)
+        guard._aiython_class_guard = True
+        node.body = header + [enter, guard]
         self.function = previous
         return node
 

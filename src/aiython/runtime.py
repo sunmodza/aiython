@@ -525,31 +525,46 @@ def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, cleanup=
     runtime.checkpoints[key] = Checkpoint(unit, span, statement, target,
         ast.unparse(node.annotation) if isinstance(node, ast.AnnAssign) else None,
         retry_allowed)
-    counter = '__aiython_recovery_attempt_' + hashlib.sha256(key.encode()).hexdigest()[:16]
-    template = ast.parse(
-        "if True:\n"
-        f"    {counter} = 0\n"
-        "    while True:\n"
-        "        try:\n"
-        "            pass\n"
-        f"        except {RUNTIME_NAME}.error_type as __aiython_error__:\n"
-        f"            {counter} += 1\n"
-        f"            if {RUNTIME_NAME}.recover({key!r}, __aiython_error__, {counter}):\n"
-        "                continue\n"
-        "            break\n"
-        "        else:\n"
-        "            break\n"
-    ).body[0]
+    if cleanup:
+        # Class __prepare__ mappings need not support deletion, so keep retry
+        # counts in the out-of-band class scope instead of their namespace.
+        template = ast.parse(
+            "while True:\n"
+            "    try:\n"
+            "        pass\n"
+            f"    except {RUNTIME_NAME}.error_type:\n"
+            f"        if {RUNTIME_NAME}.recover({key!r}, {RUNTIME_NAME}.current_exception()):\n"
+            "            continue\n"
+            "        break\n"
+            "    else:\n"
+            f"        {RUNTIME_NAME}.clear_recovery_count({key!r})\n"
+            "        break\n"
+        ).body[0]
+        attempt = template.body[0]
+    else:
+        counter = '__aiython_recovery_attempt_' + hashlib.sha256(key.encode()).hexdigest()[:16]
+        template = ast.parse(
+            "if True:\n"
+            f"    {counter} = 0\n"
+            "    while True:\n"
+            "        try:\n"
+            "            pass\n"
+            f"        except {RUNTIME_NAME}.error_type:\n"
+            f"            {counter} += 1\n"
+            f"            if {RUNTIME_NAME}.recover({key!r}, {RUNTIME_NAME}.current_exception(), {counter}):\n"
+            "                continue\n"
+            "            break\n"
+            "        else:\n"
+            "            break\n"
+        ).body[0]
+        attempt = template.body[1].body[0]
     for generated in ast.walk(template):
         if hasattr(generated, "lineno"):
             generated.lineno = node.lineno
             generated.end_lineno = node.end_lineno
             generated.col_offset = node.col_offset
             generated.end_col_offset = node.end_col_offset
-    template.body[1].body[0].body = [node]
-    if cleanup:
-        deletion = ast.Delete(targets=[ast.Name(id=counter, ctx=ast.Del())])
-        template.body.append(ast.copy_location(deletion, node))
+    attempt.body = [node]
     return template
 
 
@@ -566,6 +581,7 @@ class NestedCheckpoints(ast.NodeTransformer):
 
     def __init__(self, runtime, unit):
         self.runtime, self.unit, self.serial = runtime, unit, 0
+        self.in_class = False
 
     @staticmethod
     def generated(node):
@@ -598,18 +614,24 @@ class NestedCheckpoints(ast.NodeTransformer):
         return node
 
     def visit_FunctionDef(self, node):
+        previous = self.in_class
+        self.in_class = False
         node.body = self.body(node.body, preserve_docstring=True)
+        self.in_class = previous
         return node
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node):
+        previous = self.in_class
+        self.in_class = True
         node.body = self.body(node.body, preserve_docstring=True, class_body=True)
+        self.in_class = previous
         return node
 
     def visit_For(self, node):
-        node.body = self.body(node.body)
-        node.orelse = self.body(node.orelse)
+        node.body = self.body(node.body, class_body=self.in_class)
+        node.orelse = self.body(node.orelse, class_body=self.in_class)
         return node
 
     visit_AsyncFor = visit_For
@@ -618,14 +640,14 @@ class NestedCheckpoints(ast.NodeTransformer):
 
     def visit_Match(self, node):
         for case in node.cases:
-            case.body = self.body(case.body)
+            case.body = self.body(case.body, class_body=self.in_class)
         return node
 
     def visit_Try(self, node):
         # User try/except/finally and with managers must see exceptions first.
         # TypedTransformer's outer function guard is an implementation detail.
-        if getattr(node, '_aiython_type_guard', False):
-            node.body = self.body(node.body)
+        if getattr(node, '_aiython_type_guard', False) or getattr(node, '_aiython_class_guard', False):
+            node.body = self.body(node.body, class_body=self.in_class)
         return node
 
     visit_TryStar = visit_Try
@@ -633,6 +655,10 @@ class NestedCheckpoints(ast.NodeTransformer):
 
 class Runtime:
     error_type = BaseException
+
+    @staticmethod
+    def current_exception():
+        return sys.exception()
 
     def __init__(self, config: ResolvedConfig, *, agent_factory=None, stats=False, trace_plan=False):
         self._lock = threading.RLock()
@@ -906,12 +932,12 @@ class Runtime:
             raise error
         checkpoint = self.checkpoints[key]
         frame = inspect.currentframe().f_back
-        # Compiled boundaries pass a frame-local counter reset for each visit.
-        # Keep the old frame-local fallback for direct/custom callers.
+        # Function/module boundaries pass their own counter. Class boundaries
+        # keep theirs outside the metaclass's namespace.
         counts = None
         if attempt is None:
-            from .typed_runtime import SCOPE, Scope
-            scope = frame.f_locals.get(SCOPE)
+            from .typed_runtime import SCOPE, Scope, class_scope
+            scope = class_scope(frame) or frame.f_locals.get(SCOPE)
             counts = (scope.recovery_counts if isinstance(scope, Scope) else
                       frame.f_locals.setdefault("__aiython_recovery_counts__", {}))
             attempt = counts.get(key, 0) + 1
@@ -957,5 +983,13 @@ class Runtime:
             return False
         except AiythonError as exc:
             raise exc from error
+        finally:
+            del frame
+
+    def clear_recovery_count(self, key):
+        from .typed_runtime import class_scope
+        frame = inspect.currentframe().f_back
+        try:
+            class_scope(frame).recovery_counts.pop(key, None)
         finally:
             del frame
