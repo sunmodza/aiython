@@ -401,6 +401,11 @@ class Compiler:
         self.cache = {}
 
     def lookup(self, node, names):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'type' and names.get('type') is type
+                and len(node.args) == 1 and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value is None and not node.keywords):
+            return type(None)
         if isinstance(node,ast.Name):
             if node.id not in names:
                 raise UnsupportedType(f'Unresolved output type: {node.id}')

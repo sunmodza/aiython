@@ -1019,6 +1019,13 @@ point = Point()
 point.values.append(1)
 print(point.values)
 ''',
+            'dataclass union with NoneType': '''from dataclasses import dataclass
+from typing import Union
+@dataclass
+class Item:
+    value: Union[int, type(None)] = None
+print(Item.__doc__, Item().value)
+''',
             'dataclass without generated init': '''from dataclasses import dataclass
 @dataclass(slots=True, init=False)
 class Point:

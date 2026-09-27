@@ -569,6 +569,15 @@ class ContractEdgeTests(unittest.TestCase):
         value_contract.validate('first', bindings=reverse_bindings)
         class_contract.validate(str, bindings=reverse_bindings)
 
+    def test_type_none_annotation_call_is_safe_and_respects_shadowing(self):
+        contract = tc.compile_contract('typing.Union[int, type(None)]', {'typing': typing})
+        contract.validate(None)
+        contract.validate(2)
+        with self.assertRaises(tc.TypeViolation):
+            contract.validate('wrong')
+        with self.assertRaisesRegex(tc.UnsupportedType, 'annotation calls are not executed'):
+            tc.compile_contract('type(None)', {'type': lambda value: value})
+
     def test_class_custom_validator_and_missing_field(self):
         class Choice:
             value: int
