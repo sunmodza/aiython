@@ -892,6 +892,17 @@ class Example(metaclass=Meta):
         value: int = index
 print(Example.value)
 ''',
+            'method called while metaclass builds mro': '''captured = None
+class Meta(type):
+    def mro(cls):
+        cls.__dict__['capture']()
+        return super().mro()
+class Example(metaclass=Meta):
+    def capture():
+        global captured
+        captured = __class__
+print(captured is Example)
+''',
             'class locals': '''class Example:
     snapshot = sorted(locals())
 print(Example.snapshot)

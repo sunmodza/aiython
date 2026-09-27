@@ -233,6 +233,10 @@ class TypeRuntime:
         receiver_type = type(receiver)
         candidate = receiver if issubclass(receiver_type, type) else receiver_type
         mro = type.__getattribute__(candidate, '__mro__')
+        # A metaclass may call a method while building its MRO, before the
+        # new class has a finalized __mro__ tuple.
+        if not isinstance(mro, tuple):
+            return owners[0] if len(owners) == 1 else None
         if not owners:
             with self._classes_lock:
                 for base in mro:
