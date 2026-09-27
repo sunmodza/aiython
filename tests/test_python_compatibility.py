@@ -132,6 +132,35 @@ atexit.register(lambda: report('EXIT'))
                     self.assertEqual((aiython.returncode, aiython.stdout, aiython.stderr),
                                      (python.returncode, python.stdout, python.stderr))
 
+    def test_source_import_and_module_bytecode_cache_match_cpython(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for mode in ('import', 'module'):
+                for disabled in (False, True):
+                    with self.subTest(mode=mode, disabled=disabled):
+                        outputs = []
+                        for executable in ('python', 'aiython'):
+                            root = Path(directory) / f'{mode}-{disabled}-{executable}'
+                            root.mkdir()
+                            (root / 'helper.py').write_text('value = 3\n')
+                            (root / 'main.py').write_text(
+                                'from pathlib import Path\nimport helper\n'
+                                'print(Path(helper.__cached__).is_file())\n')
+                            (root / 'target.py').write_text(
+                                'from pathlib import Path\nprint(Path(__cached__).is_file())\n')
+                            command = (['main.py'] if mode == 'import' else ['-m', 'target'])
+                            if executable == 'aiython':
+                                command.insert(0, '-m')
+                                command.insert(1, 'aiython')
+                            env = os.environ.copy()
+                            if disabled:
+                                env['PYTHONDONTWRITEBYTECODE'] = '1'
+                            else:
+                                env.pop('PYTHONDONTWRITEBYTECODE', None)
+                            result = subprocess.run([sys.executable, *command], cwd=root,
+                                                    env=env, capture_output=True, text=True)
+                            outputs.append((result.returncode, result.stdout, result.stderr))
+                        self.assertEqual(outputs[1], outputs[0])
+
     def test_ai_source_and_bridge_preserve_user_runtime_name(self):
         from aiython.frontend import parse
 

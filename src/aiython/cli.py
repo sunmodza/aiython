@@ -38,7 +38,10 @@ class ProjectLoader(importlib.machinery.SourceFileLoader):
 
     def exec_module(self, module):
         source = read_source(self.path)
-        exec(self.runtime.compile_source(source, self.path), module.__dict__)
+        code = self.runtime.compile_source(source, self.path)
+        if not sys.dont_write_bytecode and not self.runtime.units[self.path].blocks:
+            self.get_code(module.__name__)
+        exec(code, module.__dict__)
 
 
 class ProjectFinder(importlib.abc.MetaPathFinder):
@@ -180,6 +183,9 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
     if compiled_code is None:
         source = read_source(path) if source is None else source
         code = runtime.compile_source(source, str(display_path), entry=True)
+        if (entry_kind == "module" and module_spec is not None and not sys.dont_write_bytecode
+                and not runtime.units[str(display_path)].blocks):
+            module_spec.loader.get_code(module_spec.name)
     else:
         code = compiled_code
     module = initial_main or types.ModuleType("__main__")
