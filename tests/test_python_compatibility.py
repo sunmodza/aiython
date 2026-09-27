@@ -846,6 +846,30 @@ threading.Thread(target=worker).start()
             'module annotation metadata': '''value: int = 2
 print('__annotations__' in globals(), '__annotate__' in globals())
 ''',
+            'non-name annotation evaluation order': '''events = []
+class Target:
+    def __setitem__(self, key, value):
+        events.append('set')
+target = Target()
+def key():
+    events.append('key')
+    return 0
+def annotation():
+    events.append('annotation')
+    return int
+target[key()]: annotation() = 2
+def fail():
+    try:
+        missing[also_missing]: 1/0 = 0
+    except NameError as error:
+        print(type(error).__name__)
+    try:
+        missing.attr: 1/0 = 0
+    except NameError as error:
+        print(type(error).__name__)
+fail()
+print(events)
+''',
             'metaclass namespace': '''class Meta(type):
     def __new__(meta, name, bases, namespace):
         print(sorted(namespace))

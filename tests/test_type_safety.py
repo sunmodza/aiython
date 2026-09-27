@@ -54,6 +54,15 @@ answer = person.age
 ''')
         self.assertEqual(result['answer'],10)
 
+    def test_function_attribute_annotation_checks_after_target_lookup(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box:
+    pass
+def set_value(box):
+    box.value: int = 'bad'
+set_value(Box())
+''')
+
     def test_parameter_variants_async_and_typevar(self):
         self.assertEqual(self.run_source('''import asyncio
 from typing import TypeVar

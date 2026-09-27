@@ -153,16 +153,6 @@ class TypedTransformerEdgeTests(unittest.TestCase):
         self.assertIn('returned', ast.unparse(transformed))
         self.assertIn('assignment', ast.unparse(transformed))
 
-    def test_non_name_annotated_target_uses_expression_validation(self):
-        tree = ast.parse('''class Sample:
-    value: int
-sample = Sample()
-sample.value: int = 2
-''')
-        transformed = TypedTransformer().visit(tree)
-        ast.fix_missing_locations(transformed)
-        self.assertIn('expression', ast.unparse(transformed))
-
     def test_expected_type_flows_through_conditional_expression(self):
         blocks = {'first': SimpleNamespace(output_type=None),
                   'second': SimpleNamespace(output_type=None)}

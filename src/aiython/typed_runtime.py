@@ -700,8 +700,20 @@ class TypedTransformer(ast.NodeTransformer):
         if isinstance(node.target,ast.Name):
             node.value = self.helper('assignment',self.visit(node.value),ast.Constant(node.target.id),ast.Constant(annotation))
             return node
-        node.value = self.helper('expression',self.visit(node.value),ast.Constant(annotation))
-        return node
+        if self.function and isinstance(node.target, ast.Attribute):
+            assignment = ast.Call(
+                ast.Attribute(ast.Attribute(ast.Name(self.runtime_name, ast.Load()), 'types', ast.Load()),
+                              'assign_attribute', ast.Load()), [], [
+                    ast.keyword(arg='value', value=self.visit(node.value)),
+                    ast.keyword(arg='owner', value=self.visit(node.target.value)),
+                    ast.keyword(arg='name', value=ast.Constant(node.target.attr)),
+                    ast.keyword(arg='annotation', value=ast.Constant(annotation)),
+                ])
+            return ast.copy_location(ast.Expr(assignment), node)
+        # Python evaluates a non-name target before its annotation. Function
+        # scopes do not evaluate these annotations at all. Let CPython keep
+        # those rules for attribute and subscript assignments.
+        return self.generic_visit(node)
 
     def visit_Assign(self,node):
         node.value = self.visit(node.value)
