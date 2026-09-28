@@ -1,51 +1,45 @@
 # Contributing to Aiython
 
-Thanks for helping improve Aiython. Bug reports, documentation fixes, examples,
-and focused code changes are welcome.
+Bug reports, documentation fixes, examples, and focused code changes are welcome.
 
-## Before you change code
+## Start with an issue
 
-- Search existing issues and pull requests for related work. For a larger change,
-  open an issue first so the behavior and scope can be discussed.
-- Keep Python in charge of execution order and side effects. New behavior should
-  apply generally, rather than depend on a particular prompt or example.
-- Keep code, examples, documentation, and user-facing messages in English.
+Search existing issues and pull requests first. For a larger change, open an
+issue to discuss the behavior before writing code. A bug report should include
+the Aiython command, CPython version, expected and actual behavior, and a small
+reproducible script. Remove credentials and private data from logs and examples.
 
-## Develop locally
+## Make a change
 
-Install CPython 3.11+ and [uv](https://docs.astral.sh/uv/), then run:
+Fork the repository and create a branch from `main`, such as `fix/error-message`
+or `docs/getting-started`. Install CPython 3.11+ and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync
-uv run aiython --explain examples/recipes/03_loop.py
-uv run python -m unittest discover -s tests -q
+uv sync --locked
+uv run --locked aiython --explain examples/recipes/03_loop.py
+uv run --locked python -m unittest discover -s tests -q
 ```
 
-The default test suite mocks provider calls and requires no API key. Use
-`--explain` to inspect an example without executing it. If a change affects a
-provider or capability, add an offline contract test for its request, response,
-and error behavior; live API checks are optional and may incur charges.
+The local tests mock provider calls and need no API key. Use `--explain` to
+inspect AI boundaries without running the program. When changing a capability
+or provider, add an offline test for its request, response, and error behavior.
 
-The documentation website uses the Markdown files in `docs/`. Preview it with
-`uv run zensical serve` and check the production build with
-`uv run zensical build --clean --strict`, then run
-`uv run python scripts/check_docs_site.py` to check rendered examples and links.
-The public site is built from a release tag after the PyPI publish job succeeds.
-It is served from the separate public
-`aiython-docs` repository; this source repository remains private. Link to pages
-inside `docs/` rather than private repository files.
+For documentation changes, run:
 
-## Submit a change
+```bash
+uv run --locked zensical build --clean --strict
+uv run --locked python scripts/check_docs_site.py
+```
 
-Keep a pull request focused and describe the user-visible behavior, why it
-changed, and how you verified it. Update the README or relevant guide when an
-interface changes. Include a small reproducible program for runtime bugs and
-check that Python statements and side effects still run in their normal order.
+## Open a pull request
 
-For a bug report, include the Aiython command, expected and actual behavior,
-Python version, and a minimal source file. `--stats` output can help locate
-latency or provider errors. Remove API keys, credentials, and private input
-before sharing logs or source.
+Push your branch and open a pull request against `main`. Explain what changed,
+why, and how you tested it. Update a relevant guide or example when behavior
+changes. Keep Python in charge of execution order and side effects, and keep
+code and documentation in English.
 
-By contributing, you agree that your contribution is licensed under the
-[MIT license](LICENSE).
+`main` accepts changes through pull requests. CI checks the package, docs,
+Python 3.11–3.14, and patched CPython hooks before a merge. The release workflow
+publishes PyPI and the documentation site from version tags.
+
+Contributions are licensed under the [MIT license](LICENSE).

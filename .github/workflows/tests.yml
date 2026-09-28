@@ -81,3 +81,34 @@ jobs:
             uuid-dev zlib1g-dev libnsl-dev libtirpc-dev
       - name: Build and test patched CPython
         run: uv run --locked --python ${{ matrix.python-version }} python scripts/build_cpython_hooks.py ${{ matrix.python-version }}
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.11.16"
+          version: latest-known
+          enable-cache: false
+      - run: uv run --locked --python 3.11.16 zensical build --clean --strict
+      - run: uv run --locked --python 3.11.16 python scripts/check_docs_site.py
+
+  required:
+    name: CI
+    if: ${{ always() }}
+    needs: [package, test, native-hooks, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every job to pass
+        env:
+          PACKAGE: ${{ needs.package.result }}
+          TEST: ${{ needs.test.result }}
+          NATIVE_HOOKS: ${{ needs.native-hooks.result }}
+          DOCS: ${{ needs.docs.result }}
+        run: |
+          for result in "$PACKAGE" "$TEST" "$NATIVE_HOOKS" "$DOCS"; do
+            test "$result" = success || exit 1
+          done
