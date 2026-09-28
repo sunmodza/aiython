@@ -45,4 +45,6 @@ Preview AI calls without running the script: `aiython --explain tickets.py`.
 
 [Documentation](https://sunmodza.github.io/aiython-docs/) · [Examples](https://sunmodza.github.io/aiython-docs/examples/) · [Installation](https://sunmodza.github.io/aiython-docs/getting-started/)
 
-Aiython is not a sandbox: AI tools run with your process permissions, and relevant code or data may be sent to your provider. MIT licensed.
+Aiython is not a sandbox: AI tools run with your process permissions, and relevant code or data may be sent to your provider.
+
+[Contributing](https://github.com/sunmodza/aiython/blob/main/CONTRIBUTING.md) · MIT licensed.

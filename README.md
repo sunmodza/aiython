@@ -47,4 +47,6 @@ aiython app.py
 
 The same works for modules: `python -m package` → `aiython -m package`. Your script and its arguments stay the same. Aiython checks declared types and can call AI for inline requests or eligible errors.
 
-Aiython is not a sandbox: AI tools run with your process permissions, and relevant code or data may be sent to your provider. [MIT licensed](LICENSE).
+Aiython is not a sandbox: AI tools run with your process permissions, and relevant code or data may be sent to your provider.
+
+[Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
