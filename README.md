@@ -1,16 +1,76 @@
-<p align="center"><img src="assets/readme/icon.png" width="88" alt="Aiython icon"></p>
+<p align="center">
+  <img src="assets/readme/icon.png" width="88" alt="Aiython icon">
+</p>
 
 <h1 align="center">Aiython</h1>
 
-<p align="center"><strong>When Python doesn’t know what to do, Aiython does.</strong></p>
+<p align="center">
+  <strong>When Python doesn’t know what to do, Aiython does.</strong>
+</p>
 
-<p align="center"><a href="docs/index.md">Documentation</a> · <a href="examples/recipes/README.md">Examples</a></p>
+<p align="center">
+  Run ordinary Python with inline AI instructions and AI-assisted recovery.
+</p>
 
-Aiython runs Python normally and can bring in AI when Python cannot parse the source or continue execution. AI works with the live program state; Python keeps control of execution.
+<p align="center">
+  <a href="docs/index.md">Documentation</a> ·
+  <a href="examples/recipes/README.md">Examples</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
+<p align="center">
+  <img
+    src="assets/readme/runtime-debug.gif"
+    alt="Python routes tickets in a loop while Aiython handles inline AI instructions."
+  >
+</p>
+
+Aiython runs Python normally. When Python cannot parse an inline instruction
+or cannot continue through an eligible error, Aiython can hand that part to AI
+using the live program state, validate the result, and let Python continue.
+
+```python
+kind: Literal["bug", "billing"] = classify this ticket
+```
+
+That is not normal Python syntax. With Aiython, it can become part of a running
+Python program.
+
+## Quick start
+
+Install Aiython with [`uv`](https://docs.astral.sh/uv/):
+
+```bash
+uv tool install aiython
+```
+
+Or with `pip`:
+
+```bash
+pip install aiython
+```
+
+Set up your AI provider:
+
+```bash
+aiython setup
+```
+
+Then run an existing Python script by replacing the command:
+
+```text
+python app.py  →  aiython app.py
+```
+
+Your script and its arguments stay the same.
+
+Modules work too:
+
+```text
+python -m package  →  aiython -m package
+```
 
 ## Example
-
-![Python routes tickets in a loop; Aiython handles the inline requests.](assets/readme/runtime-debug.gif)
 
 ```python
 from typing import Literal
@@ -19,6 +79,7 @@ tickets = [
     "After uploading a PDF, the ticket page freezes until I refresh the browser.",
     "Could you email last month's invoice and update the billing contact for our team?",
 ]
+
 queues = {"bug": [], "billing": []}
 
 for ticket in tickets:
@@ -26,27 +87,72 @@ for ticket in tickets:
     queues[kind].append(ticket)
 
 summary = summarize the routed tickets in one sentence
+
 print(queues, summary)
 ```
 
-Python runs the loop and updates `queues`. Aiython handles the inline requests using live program state and checks the declared `Literal` result.
+Python owns the loop, variables, and normal execution.
 
-## Try it
+Aiython handles the inline requests using the live program state. The declared
+`Literal["bug", "billing"]` also constrains the result before execution continues.
 
-**Run an existing Python script by replacing the command:**
+## What Aiython does
+
+- **Runs ordinary Python normally.** Existing Python remains Python.
+- **Handles inline AI instructions.** Natural-language intent can appear directly in the program.
+- **Works with live program state.** AI can reason about relevant values already available during execution.
+- **Validates declared types.** Type annotations can constrain AI-generated results.
+- **Can assist with eligible runtime failures.** Python stays in control while Aiython provides a recovery path.
+
+Aiython is a runtime layer, not a replacement programming language and not just
+another LLM API wrapper.
+
+## How it works
 
 ```text
-python app.py  →  aiython app.py
+Python source
+     │
+     ▼
+Normal Python execution
+     │
+     ├── Python can continue ───────────────► Python
+     │
+     └── AI-eligible instruction / failure
+                     │
+                     ▼
+               Aiython bridge
+                     │
+              live program state
+                     │
+                     ▼
+                 AI provider
+                     │
+              validate result
+                     │
+                     ▼
+             continue execution
 ```
 
-```bash
-pip install aiython
-aiython setup
-aiython app.py
-```
+Python remains responsible for ordinary execution. Aiython only steps in for
+supported inline instructions or eligible recovery paths.
 
-The same works for modules: `python -m package` → `aiython -m package`. Your script and its arguments stay the same. Aiython checks declared types and can call AI for inline requests or eligible errors.
+## Security
 
-Aiython is not a sandbox: AI tools run with your process permissions, and relevant code or data may be sent to your provider.
+Aiython is **not a sandbox**.
 
-[Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
+AI tools run with the permissions of your Python process. Relevant source code,
+runtime values, or other context may be sent to the configured AI provider.
+
+Review the documentation before using Aiython with sensitive data or
+high-privilege environments.
+
+## Documentation
+
+See the [documentation](docs/index.md) for configuration, providers, runtime
+behavior, type handling, recovery, and security details.
+
+For runnable examples, see [examples](examples/recipes/README.md).
+
+---
+
+[MIT License](LICENSE)
