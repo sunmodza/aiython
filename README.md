@@ -60,14 +60,6 @@ aiython setup
 
 ### 3. Run your Python script with Aiython
 
-Replace:
-
-```bash
-python app.py
-```
-
-with:
-
 ```bash
 aiython app.py
 ```
