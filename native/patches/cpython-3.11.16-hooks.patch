@@ -1,0 +1,301 @@
+diff --git a/Python/ceval.c b/Python/ceval.c
+index 1ce6bbc..41fdc4d 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -1625,6 +1625,124 @@ typedef struct {
+ #define KWNAMES_LEN() \
+     (call_shape.kwnames == NULL ? 0 : ((int)PyTuple_GET_SIZE(call_shape.kwnames)))
+ 
++/* Experimental Aiython hook. The Python callback can raise to reject a store.
++   The guard prevents assignments inside that callback from calling it again. */
++static _Thread_local int aiython_in_hook = 0;
++
++static int
++aiython_before_store(_PyInterpreterFrame *frame, PyObject *name, PyObject *value)
++{
++    /* STORE_FAST_MAYBE_NULL may legally write an empty stack reference. */
++    if (value == NULL || aiython_in_hook) {
++        return 0;
++    }
++    PyObject *callback = NULL;
++    callback = PySys_GetObject("_aiython_before_store");
++    if (callback == NULL) {
++        return 0;
++    }
++    Py_INCREF(callback);
++    PyFrameObject *borrowed = _PyFrame_GetFrameObject(frame);
++    if (borrowed == NULL) {
++        Py_DECREF(callback);
++        return -1;
++    }
++    PyObject *frame_obj = Py_NewRef(borrowed);
++    aiython_in_hook = 1;
++    PyObject *result = PyObject_CallFunctionObjArgs(callback, frame_obj, name, value, NULL);
++    aiython_in_hook = 0;
++    Py_DECREF(frame_obj);
++    Py_DECREF(callback);
++    if (result == NULL) {
++        return -1;
++    }
++    Py_DECREF(result);
++    return 0;
++}
++
++static int
++aiython_mutation_hook_enabled(void)
++{
++    return PySys_GetObject("_aiython_before_mutation") != NULL;
++}
++
++static int
++aiython_store_hook_enabled(void)
++{
++    return PySys_GetObject("_aiython_before_store") != NULL;
++}
++
++static int
++aiython_before_mutation(_PyInterpreterFrame *frame, const char *kind,
++                        PyObject *owner, PyObject *key, PyObject *value)
++{
++    if (aiython_in_hook) {
++        return 0;
++    }
++    PyObject *callback = NULL;
++    callback = PySys_GetObject("_aiython_before_mutation");
++    if (callback == NULL) {
++        return 0;
++    }
++    Py_INCREF(callback);
++    PyFrameObject *borrowed = _PyFrame_GetFrameObject(frame);
++    if (borrowed == NULL) {
++        Py_DECREF(callback);
++        return -1;
++    }
++    PyObject *kind_obj = PyUnicode_FromString(kind);
++    if (kind_obj == NULL) {
++        Py_DECREF(callback);
++        return -1;
++    }
++    PyObject *frame_obj = Py_NewRef(borrowed);
++    aiython_in_hook = 1;
++    PyObject *result = PyObject_CallFunctionObjArgs(
++        callback, frame_obj, kind_obj, owner, key, value, NULL);
++    aiython_in_hook = 0;
++    Py_DECREF(frame_obj);
++    Py_DECREF(kind_obj);
++    Py_DECREF(callback);
++    if (result == NULL) {
++        return -1;
++    }
++    Py_DECREF(result);
++    return 0;
++}
++
++static int
++aiython_function_event(_PyInterpreterFrame *frame, const char *attribute,
++                       PyObject *value)
++{
++    if (aiython_in_hook) {
++        return 0;
++    }
++    PyObject *callback = NULL;
++    callback = PySys_GetObject(attribute);
++    if (callback == NULL) {
++        return 0;
++    }
++    Py_INCREF(callback);
++    PyFrameObject *borrowed = _PyFrame_GetFrameObject(frame);
++    if (borrowed == NULL) {
++        Py_DECREF(callback);
++        return -1;
++    }
++    PyObject *frame_obj = Py_NewRef(borrowed);
++    aiython_in_hook = 1;
++    PyObject *result = value == NULL
++        ? PyObject_CallOneArg(callback, frame_obj)
++        : PyObject_CallFunctionObjArgs(callback, frame_obj, value, NULL);
++    aiython_in_hook = 0;
++    Py_DECREF(frame_obj);
++    Py_DECREF(callback);
++    if (result == NULL) {
++        return -1;
++    }
++    Py_DECREF(result);
++    return 0;
++}
++
+ PyObject* _Py_HOT_FUNCTION
+ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
+ {
+@@ -1779,6 +1897,9 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+             if (_Py_atomic_load_relaxed_int32(eval_breaker) && oparg < 2) {
+                 goto handle_eval_breaker;
+             }
++            if (oparg == 0 && aiython_function_event(frame, "_aiython_on_call", NULL) < 0) {
++                goto error;
++            }
+             DISPATCH();
+         }
+ 
+@@ -1814,6 +1935,11 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+         TARGET(STORE_FAST) {
+             PREDICTED(STORE_FAST);
+             PyObject *value = POP();
++            PyObject *name = GETITEM(frame->f_code->co_localsplusnames, oparg);
++            if (aiython_before_store(frame, name, value) < 0) {
++                Py_XDECREF(value);
++                goto error;
++            }
+             SETLOCAL(oparg, value);
+             DISPATCH();
+         }
+@@ -1853,6 +1979,11 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(STORE_FAST__LOAD_FAST) {
+             PyObject *value = POP();
++            PyObject *name = GETITEM(frame->f_code->co_localsplusnames, oparg);
++            if (aiython_before_store(frame, name, value) < 0) {
++                Py_XDECREF(value);
++                goto error;
++            }
+             SETLOCAL(oparg, value);
+             NEXTOPARG();
+             next_instr++;
+@@ -1867,10 +1998,20 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(STORE_FAST__STORE_FAST) {
+             PyObject *value = POP();
++            PyObject *name = GETITEM(frame->f_code->co_localsplusnames, oparg);
++            if (aiython_before_store(frame, name, value) < 0) {
++                Py_XDECREF(value);
++                goto error;
++            }
+             SETLOCAL(oparg, value);
+             NEXTOPARG();
+             next_instr++;
+             value = POP();
++            name = GETITEM(frame->f_code->co_localsplusnames, oparg);
++            if (aiython_before_store(frame, name, value) < 0) {
++                Py_XDECREF(value);
++                goto error;
++            }
+             SETLOCAL(oparg, value);
+             DISPATCH();
+         }
+@@ -2050,6 +2191,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(BINARY_OP_INPLACE_ADD_UNICODE) {
+             assert(cframe.use_tracing == 0);
++            DEOPT_IF(aiython_store_hook_enabled(), BINARY_OP);
+             PyObject *left = SECOND();
+             PyObject *right = TOP();
+             DEOPT_IF(!PyUnicode_CheckExact(left), BINARY_OP);
+@@ -2294,7 +2436,10 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+             int err;
+             STACK_SHRINK(3);
+             /* container[sub] = v */
+-            err = PyObject_SetItem(container, sub, v);
++            err = aiython_before_mutation(frame, "item", container, sub, v);
++            if (err == 0) {
++                err = PyObject_SetItem(container, sub, v);
++            }
+             Py_DECREF(v);
+             Py_DECREF(container);
+             Py_DECREF(sub);
+@@ -2326,6 +2471,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(STORE_SUBSCR_LIST_INT) {
+             assert(cframe.use_tracing == 0);
++            DEOPT_IF(aiython_mutation_hook_enabled(), STORE_SUBSCR);
+             PyObject *sub = TOP();
+             PyObject *list = SECOND();
+             PyObject *value = THIRD();
+@@ -2352,6 +2498,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(STORE_SUBSCR_DICT) {
+             assert(cframe.use_tracing == 0);
++            DEOPT_IF(aiython_mutation_hook_enabled(), STORE_SUBSCR);
+             PyObject *sub = TOP();
+             PyObject *dict = SECOND();
+             PyObject *value = THIRD();
+@@ -2423,6 +2570,10 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(RETURN_VALUE) {
+             PyObject *retval = POP();
++            if (aiython_function_event(frame, "_aiython_on_return", retval) < 0) {
++                Py_DECREF(retval);
++                goto error;
++            }
+             assert(EMPTY());
+             _PyFrame_SetStackPointer(frame, stack_pointer);
+             TRACE_FUNCTION_EXIT();
+@@ -2758,6 +2909,10 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+                 Py_DECREF(v);
+                 goto error;
+             }
++            if (aiython_before_store(frame, name, v) < 0) {
++                Py_DECREF(v);
++                goto error;
++            }
+             if (PyDict_CheckExact(ns))
+                 err = PyDict_SetItem(ns, name, v);
+             else
+@@ -2879,7 +3034,10 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+             PyObject *v = SECOND();
+             int err;
+             STACK_SHRINK(2);
+-            err = PyObject_SetAttr(owner, name, v);
++            err = aiython_before_mutation(frame, "attr", owner, name, v);
++            if (err == 0) {
++                err = PyObject_SetAttr(owner, name, v);
++            }
+             Py_DECREF(v);
+             Py_DECREF(owner);
+             if (err != 0) {
+@@ -2904,6 +3062,10 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+             PyObject *name = GETITEM(names, oparg);
+             PyObject *v = POP();
+             int err;
++            if (aiython_before_store(frame, name, v) < 0) {
++                Py_DECREF(v);
++                goto error;
++            }
+             err = PyDict_SetItem(GLOBALS(), name, v);
+             Py_DECREF(v);
+             if (err != 0)
+@@ -3190,6 +3352,11 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(STORE_DEREF) {
+             PyObject *v = POP();
++            PyObject *name = GETITEM(frame->f_code->co_localsplusnames, oparg);
++            if (aiython_before_store(frame, name, v) < 0) {
++                Py_DECREF(v);
++                goto error;
++            }
+             PyObject *cell = GETLOCAL(oparg);
+             PyObject *oldobj = PyCell_GET(cell);
+             PyCell_SET(cell, v);
+@@ -3600,6 +3767,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(STORE_ATTR_INSTANCE_VALUE) {
+             assert(cframe.use_tracing == 0);
++            DEOPT_IF(aiython_mutation_hook_enabled(), STORE_ATTR);
+             PyObject *owner = TOP();
+             PyTypeObject *tp = Py_TYPE(owner);
+             _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+@@ -3628,6 +3796,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(STORE_ATTR_WITH_HINT) {
+             assert(cframe.use_tracing == 0);
++            DEOPT_IF(aiython_mutation_hook_enabled(), STORE_ATTR);
+             PyObject *owner = TOP();
+             PyTypeObject *tp = Py_TYPE(owner);
+             _PyAttrCache *cache = (_PyAttrCache *)next_instr;
+@@ -3675,6 +3844,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ 
+         TARGET(STORE_ATTR_SLOT) {
+             assert(cframe.use_tracing == 0);
++            DEOPT_IF(aiython_mutation_hook_enabled(), STORE_ATTR);
+             PyObject *owner = TOP();
+             PyTypeObject *tp = Py_TYPE(owner);
+             _PyAttrCache *cache = (_PyAttrCache *)next_instr;

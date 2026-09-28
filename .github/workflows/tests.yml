@@ -14,10 +14,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          python-version: "3.11"
+          python-version: "3.11.16"
           version: latest-known
       - run: uv build --no-sources
-      - run: uv venv --python 3.11 /tmp/aiython-wheel-smoke
+      - run: uv venv --python 3.11.16 /tmp/aiython-wheel-smoke
       - run: uv pip install --python /tmp/aiython-wheel-smoke/bin/python dist/*.whl
       - run: /tmp/aiython-wheel-smoke/bin/aiython --version
       - run: |
@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11.16", "3.12.14", "3.13.15", "3.14.4"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
@@ -37,6 +37,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
           version: latest-known
       - run: uv python install ${{ matrix.python-version }}
+      - name: Prepare offline project credentials
+        run: |
+          mkdir -p .aiython
+          printf 'OPENROUTER_API_KEY=offline-test\n' > .aiython/credentials.env
+      - name: Check CPython frontend code objects
+        run: uv run --locked --python ${{ matrix.python-version }} python benchmarks/stdlib_syntax.py
       - name: Test with line and branch coverage
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/.coveragerc
@@ -48,7 +54,30 @@ jobs:
           uv run --locked --python ${{ matrix.python-version }} --extra a2a python -m coverage json -o coverage.json
           uv run --locked --python ${{ matrix.python-version }} python scripts/coverage_summary.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
         with:
           name: coverage-${{ matrix.python-version }}
           path: coverage.json
-          if-no-files-found: error
+          if-no-files-found: warn
+
+  native-hooks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11.16", "3.12.14", "3.13.15", "3.14.4"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          version: latest-known
+      - name: Install CPython build headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config libbz2-dev libffi-dev \
+            libgdbm-dev libgdbm-compat-dev liblzma-dev libncurses-dev \
+            libreadline-dev libsqlite3-dev libssl-dev libzstd-dev tk-dev \
+            uuid-dev zlib1g-dev libnsl-dev libtirpc-dev
+      - name: Build and test patched CPython
+        run: uv run --locked --python ${{ matrix.python-version }} python scripts/build_cpython_hooks.py ${{ matrix.python-version }}

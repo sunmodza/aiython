@@ -54,6 +54,36 @@ answer = person.age
 ''')
         self.assertEqual(result['answer'],10)
 
+    def test_annotations_added_after_class_creation_are_checked(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box: pass
+box = Box()
+box.value = 'wrong'
+Box.__annotations__ = {'value': int}
+answer = 1
+''')
+
+    def test_custom_dict_descriptor_does_not_hide_invalid_fields(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box:
+    value: int
+    def __init__(self): self.value = 3
+    @property
+    def __dict__(self): return 'not a dict'
+box = Box()
+object.__setattr__(box, 'value', 'wrong')
+answer = 1
+''')
+
+    def test_function_attribute_annotation_checks_after_target_lookup(self):
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box:
+    pass
+def set_value(box):
+    box.value: int = 'bad'
+set_value(Box())
+''')
+
     def test_parameter_variants_async_and_typevar(self):
         self.assertEqual(self.run_source('''import asyncio
 from typing import TypeVar
@@ -70,6 +100,109 @@ T = TypeVar('T')
 def broken(x: T) -> T:
     return 'wrong'
 broken(1)
+''')
+
+    def test_unpack_typed_dict_keyword_arguments(self):
+        prelude = '''from typing import NotRequired, TypedDict, Unpack
+class Options(TypedDict):
+    count: int
+    label: NotRequired[str]
+def describe(**kwargs: Unpack[Options]) -> tuple[int, str | None]:
+    return kwargs['count'], kwargs.get('label')
+'''
+        result = self.run_source(prelude + "answer = describe(count=2, label='ready')\n")
+        self.assertEqual(result['answer'], (2, 'ready'))
+        for call in ('describe(count="bad")', 'describe(label="missing")',
+                     'describe(count=2, label=3)'):
+            with self.subTest(call=call), self.assertRaises(TypeViolation):
+                self.run_source(prelude + call + '\n')
+
+    def test_self_annotated_field_uses_instance_class(self):
+        prelude = '''from typing import Self
+class Node:
+    next: Self | None
+    def __init__(self):
+        self.next = None
+class Child(Node):
+    pass
+child = Child()
+'''
+        result = self.run_source(prelude + 'child.next = Child()\nanswer = isinstance(child.next, Child)\n')
+        self.assertTrue(result['answer'])
+        with self.assertRaises(TypeViolation):
+            self.run_source(prelude + 'child.next = Node()\n')
+
+    def test_self_in_methods_with_renamed_receiver(self):
+        source = '''from typing import Self
+class Base:
+    def clone(this) -> Self:
+        return type(this)()
+    @classmethod
+    def create(klass) -> Self:
+        return klass()
+    @property
+    def same(this) -> Self:
+        return this
+    def keep(this):
+        local: Self = this
+        return local
+class Child(Base):
+    pass
+child = Child()
+answer = (type(child.clone()), type(Child.create()), type(child.same), type(child.keep()))
+'''
+        result = self.run_source(source)
+        self.assertEqual(result['answer'], (result['Child'],) * 4)
+        for method in ('''def clone(this) -> Self:
+        return Base()''', '''@classmethod
+    def create(klass) -> Self:
+        return Base()'''):
+            with self.subTest(method=method), self.assertRaises(TypeViolation):
+                self.run_source('from typing import Self\nclass Base:\n    ' + method +
+                                '\nclass Child(Base): pass\n' +
+                                ('Child.create()\n' if 'classmethod' in method else 'Child().clone()\n'))
+
+    def test_self_in_methods_assigned_after_class_creation(self):
+        prelude = '''from typing import Self
+class Base: pass
+class Child(Base): pass
+def clone(this) -> Self:
+    return type(this)()
+def create(klass) -> Self:
+    return klass()
+Base.clone = clone
+Base.create = classmethod(create)
+'''
+        result = self.run_source(prelude + '''child = Child()
+answer = (type(child.clone()), type(Child.create()))
+''')
+        self.assertEqual(result['answer'], (result['Child'], result['Child']))
+        late = self.run_source('''from typing import Self as S
+class Base: pass
+class Child(Base): pass
+def clone(this) -> S:
+    return type(this)()
+setattr(Base, 'clone', clone)
+answer = type(Child().clone())
+''')
+        self.assertIs(late['answer'], late['Child'])
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from typing import Self
+class Base: pass
+class Child(Base): pass
+def wrong(this) -> Self:
+    return Base()
+Base.clone = wrong
+Child().clone()
+''')
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from typing import Self
+class Base: pass
+class Child(Base): pass
+def wrong(this) -> Self:
+    return Base()
+setattr(Base, 'clone', wrong)
+Child().clone()
 ''')
 
     @unittest.skipIf(sys.version_info < (3, 12), "The type statement requires Python 3.12")
@@ -245,6 +378,63 @@ class Item:
 item = Item('bad')
 ''')
 
+    def test_dataclass_initvar_input_and_factory_field_are_checked(self):
+        prelude = '''from dataclasses import InitVar, dataclass, field
+@dataclass
+class Item:
+    offset: InitVar[int]
+    values: list[int] = field(default_factory=list)
+    def __post_init__(self, offset):
+        self.values.append(offset)
+'''
+        self.assertEqual(self.run_source(prelude + 'item = Item(2)\nanswer = item.values\n')['answer'], [2])
+        with self.assertRaises(TypeViolation):
+            self.run_source(prelude + "Item('bad')\n")
+        with self.assertRaises(TypeViolation):
+            self.run_source(prelude + "item = Item(2)\nitem.values.append('bad')\n")
+
+    def test_third_party_field_descriptors_keep_instance_checks(self):
+        for prelude in ('''from pydantic import BaseModel, Field
+class Item(BaseModel):
+    count: int = Field(default=1)
+''', '''from attrs import define, field
+@define
+class Item:
+    count: int = field(default=1)
+'''):
+            with self.subTest(prelude=prelude):
+                self.assertEqual(self.run_source(prelude + 'answer = Item().count\n')['answer'], 1)
+                with self.assertRaises(TypeViolation):
+                    self.run_source(prelude + "item = Item()\nitem.count = 'bad'\n")
+
+        private = '''from pydantic import BaseModel, PrivateAttr
+class Item(BaseModel):
+    _cache: list[int] = PrivateAttr(default_factory=list)
+'''
+        self.assertEqual(self.run_source(private + 'item = Item()\nanswer = item._cache\n')['answer'], [])
+        with self.assertRaises(TypeViolation):
+            self.run_source(private + "item = Item()\nitem._cache.append('bad')\n")
+
+        factory = '''from attrs import define, Factory
+@define
+class Item:
+    values: list[int] = Factory(list)
+'''
+        self.assertEqual(self.run_source(factory + 'answer = Item().values\n')['answer'], [])
+        with self.assertRaises(TypeViolation):
+            self.run_source(factory + "item = Item()\nitem.values.append('bad')\n")
+
+    def test_descriptor_annotation_checks_resolved_instance_value(self):
+        prelude = '''class Field:
+    def __get__(self, instance, owner=None):
+        return self.value
+class Item:
+    amount: int = Field()
+'''
+        self.assertEqual(self.run_source(prelude + 'Field.value = 2\nanswer = Item().amount\n')['answer'], 2)
+        with self.assertRaises(TypeViolation):
+            self.run_source(prelude + "Field.value = 'bad'\nitem = Item()\n")
+
     def test_typed_natural_language_keeps_subscript_inside_statement(self):
         from aiython.frontend import parse
         unit = parse('analysis: TicketAnalysis = analyze the ticket from ticket["message"]\n','test.py')
@@ -263,10 +453,27 @@ item = Item('bad')
         self.assertEqual(describe_output('Level',namespace)['enum'],['high','low'])
         json.dumps(describe_output('Literal[Level.HIGH]',namespace))
 
+    def test_annotated_enum_members_check_materialized_value(self):
+        self.assertEqual(self.run_source('''from enum import IntEnum, auto
+class Number(IntEnum):
+    ONE: int = auto()
+answer = Number.ONE.value
+''')['answer'], 1)
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from enum import Enum
+class Item(Enum):
+    ONE: str = 1
+''')
+        with self.assertRaises(TypeViolation):
+            self.run_source('''from enum import auto
+class Item:
+    one: int = auto()
+''')
+
     def test_unsupported_contract_fails_before_model_call(self):
         provider = Mock()
         with self.assertRaises(UnsupportedType):
-            self.run_source('from typing import Callable\nanswer: Callable[[int], str] = choose a function',ToolAgent(provider))
+            self.run_source('from typing import LiteralString\nanswer: LiteralString = choose a string',ToolAgent(provider))
         provider.complete.assert_not_called()
 
     def test_ai_expected_type_from_function_argument_and_generic_return(self):
@@ -307,3 +514,14 @@ box = Box[int]('wrong')
 answer = identity(3)
 ''')
         self.assertEqual(result['answer'],3)
+        with self.assertRaises(TypeViolation):
+            self.run_source('''def broken[T](value: T) -> T:
+    return 'wrong'
+broken(1)
+''')
+        with self.assertRaises(TypeViolation):
+            self.run_source('''class Box[__T]:
+    def broken[__U](self, left: __T, right: __U) -> __U:
+        return left
+Box[int]().broken(1, 'expected a string')
+''')

@@ -422,8 +422,9 @@ class Participant:
 class Group:
     def __init__(self, project_root=None):
         if project_root is None:
-            main_module = sys.modules.get("__main__")
-            runtime = getattr(main_module, "__aiython_runtime__", None)
+            from .cli import ProjectFinder
+            runtime = next((finder.runtime for finder in sys.meta_path
+                            if isinstance(finder, ProjectFinder)), None)
             project_root = runtime.config.project_root if runtime is not None else Path.cwd()
         self.project_root = str(Path(project_root).resolve())
         self._ticket: Ticket | None = None

@@ -1,0 +1,6 @@
+# Peeled CPython release-tag commits. Keep these in sync with the CI matrix.
+[versions]
+"3.11.16" = "41388c9cb160d0886d5ca00d2e6c8782608a4549"
+"3.12.14" = "2abcf904b8dac8c999d2b3aac76681abb333798a"
+"3.13.15" = "4061bc4c35f7c26f25264666d4ba083b93d2f6f9"
+"3.14.4" = "23116f998f6789d8c2fbe5ed5b8146854c8c2a4f"

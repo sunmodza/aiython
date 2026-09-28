@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from collections import OrderedDict
+import copy
 import hashlib
 from functools import lru_cache
 import inspect
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from collections.abc import MutableMapping
 from typing import Any
 
-from .frontend import RUNTIME_NAME, Unit
+from .frontend import RUNTIME_NAME, Unit, runtime_binding_name
 from .models import (AgentRequest, AiythonError, ConfigError, DirectiveContext,
                      RecoveryDecision, RecoveryRequest, ResolvedConfig, SourceSpan)
 from .stats import Stats
@@ -115,11 +116,41 @@ def expression_code(source):
 
 
 @lru_cache(maxsize=128)
-def snippet_code(source):
+def snippet_code(source, runtime_name=RUNTIME_NAME):
     from .typed_runtime import TypedTransformer
-    tree = TypedTransformer(snippet=True).visit(ast.parse(source, '<aiython-exec>'))
+    tree = TypedTransformer(snippet=True, runtime_name=runtime_name).visit(ast.parse(source, '<aiython-exec>'))
+    tree = RuntimeReferences(runtime_name).visit(tree)
     ast.fix_missing_locations(tree)
     return compile(tree, '<aiython-exec>', 'exec')
+
+
+class RuntimeReferences(ast.NodeTransformer):
+    """Keep generated runtime access out of Python's user-visible namespaces."""
+
+    def __init__(self, runtime_name):
+        self.runtime_name = runtime_name
+
+    def visit_Name(self, node):
+        if node.id == self.runtime_name and isinstance(node.ctx, ast.Load):
+            return ast.copy_location(ast.Constant(self.runtime_name + 'constant'), node)
+        return node
+
+
+def bind_runtime(code, runtime_name, runtime):
+    """Bind an execution's runtime after compiling or retrieving cached code."""
+    marker = runtime_name + 'constant'
+    constants = tuple(bind_runtime(value, runtime_name, runtime)
+                      if isinstance(value, types.CodeType) else
+                      runtime if isinstance(value, str) and value == marker else value
+                      for value in code.co_consts)
+    return (code.replace(co_consts=constants)
+            if any(bound is not original for bound, original in zip(constants, code.co_consts))
+            else code)
+
+
+def internal_binding(name, runtime_name):
+    return (name == runtime_name + 'recovery_counts'
+            or name.startswith(runtime_name + 'recovery_attempt_'))
 
 
 # Calling type's built-in descriptors bypasses user metaclass __getattribute__
@@ -210,8 +241,8 @@ class RuntimeBridge:
 
     def exec(self, code: str) -> None:
         prepare = snippet_code if len(code) <= 64 * 1024 else snippet_code.__wrapped__
-        compiled = prepare(code)
-        self.namespace()[RUNTIME_NAME] = self.manager
+        runtime_name = runtime_binding_name(code)
+        compiled = bind_runtime(prepare(code, runtime_name), runtime_name, self.manager)
         from .source_guard import protect_source
         with protect_source(self.manager):
             exec(compiled, self.frame.f_globals, self.namespace())
@@ -221,7 +252,9 @@ class RuntimeBridge:
         return self.eval(name)
 
     def set(self, name: str, value: Any) -> None:
-        if not name.isidentifier() or name.startswith("__aiython_"):
+        unit = self.manager.units.get(self.frame.f_code.co_filename)
+        runtime_name = unit.runtime_name if unit else RUNTIME_NAME
+        if not name.isidentifier() or internal_binding(name, runtime_name):
             raise ValueError("Binding must be a non-reserved Python identifier")
         self.manager.types.assignment_in(self.frame, value, name)
         self.namespace()[name] = value
@@ -366,10 +399,12 @@ class RuntimeBridge:
         while tb:
             frame = tb.tb_frame
             if frame.f_code.co_filename in self.manager.units:
+                unit = self.manager.units[frame.f_code.co_filename]
+                runtime_name = unit.runtime_name if unit is not None else RUNTIME_NAME
                 result.append({"filename": frame.f_code.co_filename, "line": tb.tb_lineno,
                                "name": frame.f_code.co_name, "active": frame is self.frame,
                                "locals": {k: self.handle(v) for k, v in frame.f_locals.items()
-                                          if not k.startswith("__aiython_")}})
+                                          if not internal_binding(k, runtime_name)}})
             tb = tb.tb_next
         return result
 
@@ -377,6 +412,7 @@ class RuntimeBridge:
 class DynamicNames(ast.NodeTransformer):
     def __init__(self, unit: Unit):
         self.table = symtable.symtable(unit.transformed, unit.filename, "exec")
+        self.runtime_name = unit.runtime_name
         self.used_tables: set[int] = set()
 
     def in_scope(self, name: str, line: int, body):
@@ -446,7 +482,7 @@ class DynamicNames(ast.NodeTransformer):
         return node
 
     def visit_Name(self, node):
-        if not isinstance(node.ctx, ast.Load) or node.id.startswith("__aiython_") or node.id == "super":
+        if not isinstance(node.ctx, ast.Load) or node.id == self.runtime_name or node.id == "super":
             # Keep CPython's compiler recognition of zero-argument super(),
             # which creates the implicit __class__ closure cell.
             return node
@@ -457,7 +493,7 @@ class DynamicNames(ast.NodeTransformer):
         except KeyError:
             return node
         if symbol.is_global() and not symbol.is_declared_global():
-            call = ast.Call(ast.Attribute(ast.Name(RUNTIME_NAME, ast.Load()), "lookup", ast.Load()),
+            call = ast.Call(ast.Attribute(ast.Name(self.runtime_name, ast.Load()), "lookup", ast.Load()),
                             [ast.Constant(node.id)], [])
             return ast.copy_location(call, node)
         return node
@@ -466,8 +502,9 @@ class DynamicNames(ast.NodeTransformer):
 class AsyncCalls(ast.NodeTransformer):
     """Await suspended AI calls in coroutines without changing Python scheduling."""
 
-    def __init__(self):
+    def __init__(self, runtime_name=RUNTIME_NAME):
         self.in_async = False
+        self.runtime_name = runtime_name
 
     def _body(self, node, active):
         previous = self.in_async
@@ -505,14 +542,15 @@ class AsyncCalls(ast.NodeTransformer):
         node = self.generic_visit(node)
         if (self.in_async and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == RUNTIME_NAME and node.func.attr == "execute"):
+                and node.func.value.id == self.runtime_name and node.func.attr == "execute"):
             node.func.attr = "aexecute"
             return ast.copy_location(ast.Await(value=node), node)
         return node
 
 
-def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, cleanup=False):
+def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, scoped_retries=False):
     """Catch one statement without replaying statements before it."""
+    runtime_name = unit.runtime_name
     target = None
     if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
         target = node.targets[0].id
@@ -525,31 +563,45 @@ def install_checkpoint(runtime, unit, node, key, *, retry_allowed=True, cleanup=
     runtime.checkpoints[key] = Checkpoint(unit, span, statement, target,
         ast.unparse(node.annotation) if isinstance(node, ast.AnnAssign) else None,
         retry_allowed)
-    counter = '__aiython_recovery_attempt_' + hashlib.sha256(key.encode()).hexdigest()[:16]
-    template = ast.parse(
-        "if True:\n"
-        f"    {counter} = 0\n"
-        "    while True:\n"
-        "        try:\n"
-        "            pass\n"
-        f"        except {RUNTIME_NAME}.error_type as __aiython_error__:\n"
-        f"            {counter} += 1\n"
-        f"            if {RUNTIME_NAME}.recover({key!r}, __aiython_error__, {counter}):\n"
-        "                continue\n"
-        "            break\n"
-        "        else:\n"
-        "            break\n"
-    ).body[0]
+    if scoped_retries:
+        # Store retry counts in the type scope, away from user bindings.
+        template = ast.parse(
+            "while True:\n"
+            "    try:\n"
+            "        pass\n"
+            f"    except {runtime_name}.error_type:\n"
+            f"        if {runtime_name}.recover({key!r}, {runtime_name}.current_exception()):\n"
+            "            continue\n"
+            "        break\n"
+            "    else:\n"
+            f"        {runtime_name}.clear_recovery_count({key!r})\n"
+            "        break\n"
+        ).body[0]
+        attempt = template.body[0]
+    else:
+        counter = runtime_name + 'recovery_attempt_' + hashlib.sha256(key.encode()).hexdigest()[:16]
+        template = ast.parse(
+            "if True:\n"
+            f"    {counter} = 0\n"
+            "    while True:\n"
+            "        try:\n"
+            "            pass\n"
+            f"        except {runtime_name}.error_type:\n"
+            f"            {counter} += 1\n"
+            f"            if {runtime_name}.recover({key!r}, {runtime_name}.current_exception(), {counter}):\n"
+            "                continue\n"
+            "            break\n"
+            "        else:\n"
+            "            break\n"
+        ).body[0]
+        attempt = template.body[1].body[0]
     for generated in ast.walk(template):
         if hasattr(generated, "lineno"):
             generated.lineno = node.lineno
             generated.end_lineno = node.end_lineno
             generated.col_offset = node.col_offset
             generated.end_col_offset = node.end_col_offset
-    template.body[1].body[0].body = [node]
-    if cleanup:
-        deletion = ast.Delete(targets=[ast.Name(id=counter, ctx=ast.Del())])
-        template.body.append(ast.copy_location(deletion, node))
+    attempt.body = [node]
     return template
 
 
@@ -566,20 +618,17 @@ class NestedCheckpoints(ast.NodeTransformer):
 
     def __init__(self, runtime, unit):
         self.runtime, self.unit, self.serial = runtime, unit, 0
+        self.scoped_retries = False
 
-    @staticmethod
-    def generated(node):
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith('__aiython_')
-                                                 for t in node.targets):
-            return True
+    def generated(self, node):
         if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
             return False
         func = node.value.func
         while isinstance(func, ast.Attribute):
             func = func.value
-        return isinstance(func, ast.Name) and func.id == RUNTIME_NAME
+        return isinstance(func, ast.Name) and func.id == self.unit.runtime_name
 
-    def body(self, statements, *, nested=True, preserve_docstring=False, class_body=False):
+    def body(self, statements, *, nested=True, preserve_docstring=False, scoped_retries=False):
         result = []
         for index, node in enumerate(statements):
             node = self.visit(node)
@@ -589,27 +638,39 @@ class NestedCheckpoints(ast.NodeTransformer):
                     and not self.generated(node)):
                 self.serial += 1
                 key = f'{self.unit.filename}:nested-checkpoint:{self.serial}'
-                node = install_checkpoint(self.runtime, self.unit, node, key, cleanup=class_body)
+                node = install_checkpoint(self.runtime, self.unit, node, key, scoped_retries=scoped_retries)
             result.append(node)
         return result
 
     def visit_Module(self, node):
-        node.body = self.body(node.body, nested=False)
+        previous = self.scoped_retries
+        self.scoped_retries = True
+        try:
+            node.body = self.body(node.body, nested=False)
+        finally:
+            self.scoped_retries = previous
         return node
 
     def visit_FunctionDef(self, node):
-        node.body = self.body(node.body, preserve_docstring=True)
+        previous = self.scoped_retries
+        self.scoped_retries = True
+        node.body = self.body(node.body, preserve_docstring=True,
+                              scoped_retries=True)
+        self.scoped_retries = previous
         return node
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node):
-        node.body = self.body(node.body, preserve_docstring=True, class_body=True)
+        previous = self.scoped_retries
+        self.scoped_retries = True
+        node.body = self.body(node.body, preserve_docstring=True, scoped_retries=True)
+        self.scoped_retries = previous
         return node
 
     def visit_For(self, node):
-        node.body = self.body(node.body)
-        node.orelse = self.body(node.orelse)
+        node.body = self.body(node.body, scoped_retries=self.scoped_retries)
+        node.orelse = self.body(node.orelse, scoped_retries=self.scoped_retries)
         return node
 
     visit_AsyncFor = visit_For
@@ -618,27 +679,38 @@ class NestedCheckpoints(ast.NodeTransformer):
 
     def visit_Match(self, node):
         for case in node.cases:
-            case.body = self.body(case.body)
+            case.body = self.body(case.body, scoped_retries=self.scoped_retries)
         return node
 
     def visit_Try(self, node):
         # User try/except/finally and with managers must see exceptions first.
         # TypedTransformer's outer function guard is an implementation detail.
-        if getattr(node, '_aiython_type_guard', False):
-            node.body = self.body(node.body)
+        if getattr(node, '_aiython_module_guard', False):
+            node.body = self.body(node.body, nested=False)
+        elif getattr(node, '_aiython_type_guard', False) or getattr(node, '_aiython_class_guard', False):
+            node.body = self.body(node.body, scoped_retries=self.scoped_retries)
         return node
 
     visit_TryStar = visit_Try
 
 
 class Runtime:
-    error_type = BaseException
+    # Recovery handles ordinary failures; scope cleanup also sees control signals.
+    error_type = Exception
+    scope_error_type = BaseException
+
+    @staticmethod
+    def current_exception():
+        return sys.exception()
 
     def __init__(self, config: ResolvedConfig, *, agent_factory=None, stats=False, trace_plan=False):
         self._lock = threading.RLock()
+        self._bound_codes = OrderedDict()
         self.config = config
         from .typed_runtime import TypeRuntime
-        self.types = TypeRuntime()
+        self.types = TypeRuntime(self)
+        from .native_bridge import NativeTypeBridge
+        self.bridge = NativeTypeBridge(self.types, manager=self)
         from .capabilities import CapabilityRuntime
         self.capabilities = CapabilityRuntime(config, trace=trace_plan)
         self.agent_factory = agent_factory
@@ -666,14 +738,16 @@ class Runtime:
     def compile_source(self, source, filename, *, entry=False):
         """Reuse preparation across executions, always restoring fresh metadata."""
         from .frontend import parse
-        key = (type(self), sys.implementation.cache_tag, filename, self.source_revision(source), entry)
+        key = (type(self), sys.implementation.cache_tag, filename,
+               self.source_revision(source), entry, bool(self.config.profiles),
+               bool(self.types.classes), bool(self.types._module_scopes))
         started = perf_counter()
         with _PREPARED_LOCK:
             cached = _PREPARED.get(key)
             if cached is not None:
                 _PREPARED.move_to_end(key)
         if cached is not None:
-            code, packet = cached
+            code, packet, native = cached
             unit, blocks, checkpoints, frames, nodes, names, hints = pickle.loads(packet)
             with self._lock:
                 self.units[filename] = unit
@@ -687,14 +761,18 @@ class Runtime:
             if self.stats.enabled:
                 self.stats.preparation_cache_hits += 1
                 self.stats.prepare_seconds += perf_counter() - started
-            return code
+            return code if native else self._bind_compiled(code, unit.runtime_name)
         unit = parse(source, filename)
         if self.stats.enabled:
             self.stats.parse_seconds += perf_counter() - started
             self.stats.preparation_cache_misses += 1
-        code = self.prepare(unit, entry=entry)
+        prepared = perf_counter()
+        code, native = self.bridge.prepare_unit(unit, entry=entry)
+        if native:
+            if self.stats.enabled:
+                self.stats.prepare_seconds += perf_counter() - prepared
         # Large generated programs run normally without displacing the cache.
-        if len(source) <= 256 * 1024:
+        if len(source) <= 256 * 1024 and not self.bridge.uses_vm(code):
             with self._lock:
                 packet = pickle.dumps((unit,
                     {k: v for k, v in self.blocks.items() if v[0].filename == filename},
@@ -705,10 +783,25 @@ class Runtime:
                     {node: self.source_hints[node] for node in ast.walk(unit.tree)
                      if node in self.source_hints}))
             with _PREPARED_LOCK:
-                _PREPARED[key] = (code, packet)
+                _PREPARED[key] = (code, packet, native)
                 while len(_PREPARED) > _PREPARED_LIMIT or sum(len(v[1]) for v in _PREPARED.values()) > _PREPARED_BYTES:
                     _PREPARED.popitem(last=False)
-        return code
+        return (code if native else
+                self._bind_compiled(code, unit.runtime_name, cache=len(source) <= 256 * 1024))
+
+    def _bind_compiled(self, code, runtime_name, *, cache=True):
+        if not cache:
+            return bind_runtime(code, runtime_name, self)
+        with self._lock:
+            bound = self._bound_codes.get(code)
+            if bound is None:
+                bound = bind_runtime(code, runtime_name, self)
+                self._bound_codes[code] = bound
+                if len(self._bound_codes) > _PREPARED_LIMIT:
+                    self._bound_codes.popitem(last=False)
+            else:
+                self._bound_codes.move_to_end(code)
+            return bound
 
     def register(self, unit):
         self.units[unit.filename] = unit
@@ -742,22 +835,36 @@ class Runtime:
         return self.frame_sources.get(key, self.frame_sources.get(
             (code.co_filename, 1, "<module>"), {"available": False, "filename": code.co_filename}))
 
-    def prepare(self, unit: Unit, *, entry: bool = False):
+    def prepare(self, unit: Unit, *, entry: bool = False, flags: int = 0,
+                display_last_expr: bool = False, recovery_metadata: bool = False):
         started = perf_counter()
         try:
             with self._lock:
-                return self._prepare(unit, entry=entry)
+                return self._prepare(unit, entry=entry, flags=flags,
+                                     display_last_expr=display_last_expr,
+                                     recovery_metadata=recovery_metadata)
         finally:
             if self.stats.enabled:
                 self.stats.prepare_seconds += perf_counter() - started
 
-    def _prepare(self, unit: Unit, *, entry: bool = False):
+    def _prepare(self, unit: Unit, *, entry: bool = False, flags: int = 0,
+                 display_last_expr: bool = False, recovery_metadata: bool = False):
         self.register(unit)
         self.blocks.update({key: (unit, block) for key, block in unit.blocks.items()})
         linecache.cache[unit.filename] = (len(unit.source), None, unit.source.splitlines(True), unit.filename)
-        tree = unit.tree
-        from .typed_runtime import ExpectedTypes, TypedTransformer
-        ExpectedTypes(unit.blocks).visit(tree)
+        # Keep the CPython-parsed tree as source metadata. Runtime checks and
+        # recovery transform a separate tree until they can move to VM hooks.
+        # Reparse valid source: CPython's parser is faster than deepcopy for
+        # large ASTs. AI blocks need their remapped locations copied intact.
+        tree = (copy.deepcopy(unit.tree) if unit.blocks else
+                ast.parse(unit.source, unit.filename))
+        from .typed_runtime import ExpectedTypes, TypedTransformer, helper
+        if display_last_expr and tree.body and isinstance(tree.body[-1], ast.Expr):
+            expression = tree.body[-1]
+            expression.value = ast.copy_location(
+                helper('display', expression.value, runtime_name=unit.runtime_name),
+                expression.value)
+        ExpectedTypes(unit.blocks, unit.runtime_name).visit(tree)
         tables = [symtable.symtable(unit.transformed, unit.filename, "exec")]
         definitions = {(n.name, n.lineno): min([n.lineno, *(d.lineno for d in n.decorator_list)])
                        for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
@@ -770,34 +877,34 @@ class Runtime:
                 s.get_name() for s in table.get_symbols() if s.is_declared_global()}
         if unit.blocks:
             tree = DynamicNames(unit).visit(tree)
-        tree = TypedTransformer().visit(tree)
+        tree = TypedTransformer(runtime_name=unit.runtime_name).visit(tree)
         if unit.blocks and any(isinstance(node, ast.AsyncFunctionDef) for node in ast.walk(tree)):
-            tree = AsyncCalls().visit(tree)
-        tree = NestedCheckpoints(self, unit).visit(tree)
+            tree = AsyncCalls(unit.runtime_name).visit(tree)
+        recovery_enabled = bool(self.config.profiles) or recovery_metadata
+        if recovery_enabled:
+            tree = NestedCheckpoints(self, unit).visit(tree)
         ast.fix_missing_locations(tree)
-        if entry:
-            body = []
-            for index, node in enumerate(tree.body):
-                from .typed_runtime import SCOPE
-                internal_scope = isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == SCOPE for t in node.targets)
-                internal_check = (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                                  and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == 'checkpoint')
-                if internal_scope or internal_check:
-                    body.append(node)
-                    continue
-                if (isinstance(node, ast.ImportFrom) and node.module == "__future__") or (
-                    index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, str)):
-                    body.append(node)
-                    continue
-                key = f"{unit.filename}:checkpoint:{index}"
-                retry_allowed = not isinstance(node, (ast.For, ast.AsyncFor, ast.While,
-                    ast.If, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match,
-                    ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-                body.append(install_checkpoint(self, unit, node, key, retry_allowed=retry_allowed))
-            tree.body = body
+        if entry and recovery_enabled:
+            guard = next((node for node in tree.body if getattr(node, '_aiython_module_guard', False)), None)
+            if guard is not None:
+                body = []
+                for index, node in enumerate(guard.body):
+                    internal_check = (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                                      and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == 'checkpoint')
+                    if internal_check:
+                        body.append(node)
+                        continue
+                    key = f"{unit.filename}:checkpoint:{index}"
+                    retry_allowed = not isinstance(node, (ast.For, ast.AsyncFor, ast.While,
+                        ast.If, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match,
+                        ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                    body.append(install_checkpoint(self, unit, node, key, retry_allowed=retry_allowed,
+                                                   scoped_retries=True))
+                guard.body = body
         ast.fix_missing_locations(tree)
-        return compile(tree, unit.filename, "exec", dont_inherit=True)
+        tree = RuntimeReferences(unit.runtime_name).visit(tree)
+        ast.fix_missing_locations(tree)
+        return compile(tree, unit.filename, "exec", flags=flags, dont_inherit=True)
 
     def lookup(self, name: str):
         frame = inspect.currentframe().f_back
@@ -836,11 +943,12 @@ class Runtime:
 
     def request(self, statement, span, unit, frame, context):
         profile, prompts, agent = self.selection(context)
-        objects = {k: v for k, v in frame.f_locals.items() if not k.startswith("__aiython_")}
+        objects = {k: v for k, v in frame.f_locals.items()
+                   if not internal_binding(k, unit.runtime_name)}
         names = statement_names(statement)
         related = {k: v for k, v in objects.items() if k in names}
         for name in names - related.keys():
-            if name in frame.f_globals and not name.startswith("__aiython_"):
+            if name in frame.f_globals and not internal_binding(name, unit.runtime_name):
                 related[name] = frame.f_globals[name]
         frame_code = self.frame_source(frame).get("code", unit.source)
         return AgentRequest(statement, frame_code, related,
@@ -890,7 +998,48 @@ class Runtime:
         import concurrent.futures
         return not isinstance(error, concurrent.futures.CancelledError)
 
+    def caller_has_python_handler(self, frame) -> bool:
+        """Let an enclosing user try/with body receive the exception first."""
+        scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        protected_types = (ast.Try, ast.TryStar, ast.With, ast.AsyncWith)
+        caller = frame.f_back
+        while caller is not None:
+            unit = self.units.get(caller.f_code.co_filename)
+            if unit is not None:
+                code = caller.f_code
+                scope = unit.tree if code.co_name == '<module>' else None
+                if scope is None:
+                    for candidate in ast.walk(unit.tree):
+                        if not isinstance(candidate, scope_types):
+                            continue
+                        name = '<lambda>' if isinstance(candidate, ast.Lambda) else candidate.name
+                        first = min([candidate.lineno,
+                                     *(node.lineno for node in getattr(candidate, 'decorator_list', ()))])
+                        if (name == code.co_name and
+                                code.co_firstlineno in (first, candidate.lineno)):
+                            scope = candidate
+                            break
+                if scope is not None:
+                    pending = [scope]
+                    while pending:
+                        node = pending.pop()
+                        if node is not scope and isinstance(node, scope_types):
+                            continue
+                        if isinstance(node, protected_types):
+                            bodies = [node.body]
+                            if isinstance(node, (ast.Try, ast.TryStar)) and node.finalbody:
+                                bodies.extend(handler.body for handler in node.handlers)
+                                bodies.append(node.orelse)
+                            for body in bodies:
+                                if body and body[0].lineno <= caller.f_lineno <= body[-1].end_lineno:
+                                    return True
+                        pending.extend(ast.iter_child_nodes(node))
+            caller = caller.f_back
+        return False
+
     def recover(self, key: str, error: BaseException, attempt: int | None = None) -> bool:
+        if not self.config.profiles:
+            raise error
         if not self.recoverable(error):
             from .type_constraints import TypeViolation, UnsupportedType
             if isinstance(error, (TypeViolation, UnsupportedType)) and not getattr(error, '_aiython_location', False):
@@ -906,14 +1055,16 @@ class Runtime:
             raise error
         checkpoint = self.checkpoints[key]
         frame = inspect.currentframe().f_back
-        # Compiled boundaries pass a frame-local counter reset for each visit.
-        # Keep the old frame-local fallback for direct/custom callers.
+        if self.caller_has_python_handler(frame):
+            raise error
+        # Function/module boundaries pass their own counter. Class boundaries
+        # keep theirs outside the metaclass's namespace.
         counts = None
         if attempt is None:
-            from .typed_runtime import SCOPE, Scope
-            scope = frame.f_locals.get(SCOPE)
+            from .typed_runtime import Scope
+            scope = self.recovery_scope(frame)
             counts = (scope.recovery_counts if isinstance(scope, Scope) else
-                      frame.f_locals.setdefault("__aiython_recovery_counts__", {}))
+                      frame.f_locals.setdefault(checkpoint.unit.runtime_name + 'recovery_counts', {}))
             attempt = counts.get(key, 0) + 1
             counts[key] = attempt
         if attempt > 2:
@@ -957,5 +1108,21 @@ class Runtime:
             return False
         except AiythonError as exc:
             raise exc from error
+        finally:
+            del frame
+
+    def recovery_scope(self, frame):
+        from .typed_runtime import SCOPE, Scope, frame_scope
+        scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
+        if not isinstance(scope, Scope):
+            retained = self.types._module_scopes.get(id(frame.f_globals))
+            if retained is not None and retained[0] is frame.f_globals:
+                scope = retained[1]
+        return scope
+
+    def clear_recovery_count(self, key):
+        frame = inspect.currentframe().f_back
+        try:
+            self.recovery_scope(frame).recovery_counts.pop(key, None)
         finally:
             del frame

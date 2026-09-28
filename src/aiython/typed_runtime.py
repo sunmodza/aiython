@@ -2,20 +2,67 @@
 from __future__ import annotations
 
 import ast
+from contextvars import ContextVar
+import dataclasses
 from dataclasses import dataclass, field
+import enum
+import functools
 import inspect
+import sys
 import threading
+import types
+import typing
 import weakref
 
 from .frontend import RUNTIME_NAME
-from .type_constraints import Contract, ContractCache, TypeViolation, compile_contract, annotations_of, Compiler
+from .type_constraints import (Contract, ContractCache, TypeViolation, compile_contract,
+                               annotations_of, class_parameters, descriptor_field, Compiler, SELF_OWNER)
 
 SCOPE = '__aiython_type_scope__'
+_FRAME_SCOPES = ContextVar('aiython_frame_scopes', default=())
+_GENERATOR_SCOPES = {}
+_GENERATOR_SCOPES_LOCK = threading.RLock()
+
+
+def frame_scope(frame):
+    for active, scope in reversed(_FRAME_SCOPES.get()):
+        if active is frame:
+            return scope
+    with _GENERATOR_SCOPES_LOCK:
+        return _GENERATOR_SCOPES.get(id(frame))
+
+
+def original_class(value):
+    # Bypass user __getattribute__ while reading typing's instance metadata.
+    try:
+        return object.__getattribute__(value, '__orig_class__')
+    except AttributeError:
+        return type(value)
+
+
+def unconstrained_variadic(source, mode, namespace):
+    if mode == 'args' and source.startswith('*'):
+        return True
+    parameter_name, separator, attribute = source.partition('.')
+    if (mode in ('args', 'kwargs') and separator and attribute == mode and
+            isinstance(namespace.get(parameter_name), typing.ParamSpec)):
+        return True
+    if mode != 'args':
+        return False
+    annotation = ast.parse(source, mode='eval').body
+    if not isinstance(annotation, ast.Subscript) or not isinstance(annotation.slice, ast.Name):
+        return False
+    unpack = annotation.value
+    is_unpack = ((isinstance(unpack, ast.Name) and namespace.get(unpack.id) is typing.Unpack) or
+                 (isinstance(unpack, ast.Attribute) and unpack.attr == 'Unpack' and
+                  isinstance(unpack.value, ast.Name) and namespace.get(unpack.value.id) is typing))
+    return is_unpack and isinstance(namespace.get(annotation.slice.id), typing.TypeVarTuple)
 
 
 @dataclass
 class Scope:
     declarations: dict = field(default_factory=dict)
+    self_owner: type | None = None
     contracts: dict = field(default_factory=dict)
     bindings: dict = field(default_factory=dict)
     final_names: set = field(default_factory=set)
@@ -27,10 +74,21 @@ class Scope:
 
 
 class TypeRuntime:
-    def __init__(self):
+    def __init__(self, manager=None):
+        self.manager = manager
         self.classes = weakref.WeakSet()
-        self._classes_lock = threading.Lock()
+        self.method_owners = weakref.WeakKeyDictionary()
+        self.function_type_params = weakref.WeakKeyDictionary()
+        self._classes_lock = threading.RLock()
         self._contract_cache = threading.local()
+        self._active_instance_checks = ContextVar('aiython_active_instance_checks', default=frozenset())
+        self._module_scopes = {}
+        self.interactive_globals = None
+        self.interactive_scope = None
+
+    @staticmethod
+    def display(value):
+        sys.displayhook(value)
 
     def contract(self, annotation, namespace):
         cache = getattr(self._contract_cache, 'value', None)
@@ -47,39 +105,260 @@ class TypeRuntime:
 
     def register_class(self, cls):
         if isinstance(cls, type):
+            self._check_dataclass_initvars(cls)
+            self._check_enum_members(cls)
             with self._classes_lock:
                 self.classes.add(cls)
+                for member in type.__getattribute__(cls, '__dict__').values():
+                    self._track_method(cls, member)
         return cls
 
+    def _check_enum_members(self, cls):
+        if not issubclass(cls, enum.Enum):
+            return
+        members = vars(cls).get('_member_map_', {})
+        annotations = annotations_of(cls)
+        namespace = Compiler.module_names(cls, {}) | {cls.__name__: cls, SELF_OWNER: cls}
+        for name, source in annotations.items():
+            if name not in members:
+                continue
+            contract = self.contract(source, namespace)
+            member = members[name]
+            try:
+                contract.validate(object.__getattribute__(member, '_value_'), name)
+            except TypeViolation:
+                contract.validate(member, name)
+
+    def _check_dataclass_initvars(self, cls):
+        # A subclass inherits this attribute even when it was not decorated.
+        if '__dataclass_fields__' not in vars(cls):
+            return
+        initvars = [entry for entry in cls.__dataclass_fields__.values()
+                    if entry._field_type is dataclasses._FIELD_INITVAR and entry.init]
+        original = vars(cls).get('__init__')
+        if (not initvars or type(original) is not types.FunctionType
+                or getattr(original, '__aiython_initvars__', False)):
+            return
+        namespace = Compiler.module_names(cls, {}) | {cls.__name__: cls, SELF_OWNER: cls}
+        contracts = {entry.name: self.contract(entry.type, namespace) for entry in initvars}
+        signature = inspect.signature(original)
+
+        @functools.wraps(original)
+        def checked_init(instance, *args, **kwargs):
+            bound = signature.bind(instance, *args, **kwargs)
+            bound.apply_defaults()
+            for name, contract in contracts.items():
+                if name in bound.arguments:
+                    contract.validate(bound.arguments[name], name)
+            return original(instance, *args, **kwargs)
+
+        checked_init.__aiython_initvars__ = True
+        type.__setattr__(cls, '__init__', checked_init)
+
     @staticmethod
-    def namespace(frame):
-        namespace = dict(frame.f_globals) | dict(frame.f_locals)
-        scope = frame.f_locals.get(SCOPE)
+    def _class_field_placeholder(frame, value):
+        if frame.f_code.co_name == '<module>' or frame.f_code.co_flags & inspect.CO_OPTIMIZED:
+            return False
+        kind = type(value)
+        if kind is dataclasses.Field:
+            return True
+        if any(inspect.getattr_static(kind, method, None) is not None
+               for method in ('__get__', '__set__', '__delete__')):
+            return True
+        for module_name, class_name in (('pydantic.fields', 'FieldInfo'),
+                                        ('pydantic.fields', 'ModelPrivateAttr'),
+                                        ('attr._make', '_CountingAttr'),
+                                        ('attr._make', 'Factory')):
+            module = sys.modules.get(module_name)
+            if module is not None and kind is vars(module).get(class_name):
+                return True
+        return False
+
+    @staticmethod
+    def _enum_class_body(frame, name=None):
+        namespace = frame.f_locals
+        return (isinstance(namespace, enum._EnumDict)
+                and (name is None or name in namespace._member_names))
+
+    def _validate_instance(self, value, path, frame):
+        active = self._active_instance_checks.get()
+        if id(value) in active:
+            return
+        token = self._active_instance_checks.set(active | {id(value)})
+        try:
+            compile_contract(original_class(value), self.namespace(frame)).validate(value, path)
+        finally:
+            self._active_instance_checks.reset(token)
+
+    def _track_method(self, cls, member):
+        if type(member) is types.FunctionType:
+            methods = (member,)
+        elif type(member) is classmethod:
+            methods = (member.__func__,)
+        elif type(member) is property:
+            methods = (member.fget, member.fset, member.fdel)
+        else:
+            return
+        for method in methods:
+            visited = set()
+            while type(method) is types.FunctionType and id(method) not in visited:
+                visited.add(id(method))
+                owners = self.method_owners.setdefault(method.__code__, weakref.WeakSet())
+                owners.add(cls)
+                parameters = getattr(method, '__type_params__', ())
+                if parameters:
+                    self.function_type_params[method.__code__] = parameters
+                method = vars(method).get('__wrapped__')
+
+    def register_function(self, function):
+        if isinstance(function, (classmethod, staticmethod)):
+            method = function.__func__
+        else:
+            method = function
+        visited = set()
+        with self._classes_lock:
+            while type(method) is types.FunctionType and id(method) not in visited:
+                visited.add(id(method))
+                parameters = getattr(method, '__type_params__', ())
+                if parameters:
+                    self.function_type_params[method.__code__] = parameters
+                method = vars(method).get('__wrapped__')
+        return function
+
+    def method_self_owner(self, frame, *, discover=False):
+        with self._classes_lock:
+            owners = tuple(self.method_owners.get(frame.f_code, ()))
+        if (not owners and not discover) or not frame.f_code.co_argcount:
+            return None
+        receiver = frame.f_locals.get(frame.f_code.co_varnames[0])
+        receiver_type = type(receiver)
+        candidate = receiver if issubclass(receiver_type, type) else receiver_type
+        mro = type.__getattribute__(candidate, '__mro__')
+        # A metaclass may call a method while building its MRO, before the
+        # new class has a finalized __mro__ tuple.
+        if not isinstance(mro, tuple):
+            return owners[0] if len(owners) == 1 else None
+        if not owners:
+            with self._classes_lock:
+                for base in mro:
+                    for member in type.__getattribute__(base, '__dict__').values():
+                        self._track_method(base, member)
+                owners = tuple(self.method_owners.get(frame.f_code, ()))
+        if any(owner in mro for owner in owners):
+            return candidate
+        return owners[0] if len(owners) == 1 else None
+
+    def namespace(self, frame):
+        namespace = dict(frame.f_globals)
+        if frame.f_code.co_name != '<module>' and not frame.f_code.co_flags & inspect.CO_OPTIMIZED:
+            parents = []
+            parent = frame.f_back
+            while parent is not None and parent.f_code.co_filename == frame.f_code.co_filename:
+                if (parent.f_code.co_flags & inspect.CO_OPTIMIZED
+                        and frame.f_code.co_qualname.startswith(parent.f_code.co_qualname + '.<locals>.')):
+                    parents.append(dict(parent.f_locals))
+                parent = parent.f_back
+            for local in reversed(parents):
+                namespace.update(local)
+        namespace.update(frame.f_locals)
+        with self._classes_lock:
+            parameters = self.function_type_params.get(frame.f_code, ())
+            owners = tuple(self.method_owners.get(frame.f_code, ()))
+        namespace.update({parameter.__name__: parameter for parameter in parameters})
+        generic_owners = tuple(owner for owner in owners if class_parameters(owner))
+        if generic_owners:
+            owner = self.method_self_owner(frame) or (
+                generic_owners[0] if len(generic_owners) == 1 else None)
+            if owner is not None:
+                for parameter in class_parameters(owner):
+                    namespace[parameter.__name__] = parameter
+                    if parameter.__name__.startswith('__') and not parameter.__name__.endswith('__'):
+                        namespace[f'_{owner.__name__.lstrip("_")}{parameter.__name__}'] = parameter
+        global_scope = self._module_scopes.get(id(frame.f_globals))
+        if global_scope is not None and global_scope[0] is frame.f_globals:
+            namespace.update({parameter.__name__: bound
+                              for parameter, bound in global_scope[1].bindings.items()})
+        scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
         if isinstance(scope,Scope):
             namespace.update({parameter.__name__: bound for parameter,bound in scope.bindings.items()})
+            if scope.self_owner is not None:
+                namespace[SELF_OWNER] = scope.self_owner
         return namespace
 
-    def initialize(self, declarations, parameters=None, returns=None):
+    def _initialize(self, frame, declarations, parameters, returns):
+        namespace = self.namespace(frame)
+        owner = self.method_self_owner(frame)
+        if owner is None:
+            sources = (*declarations.values(),
+                       *(source for source, _ in (parameters or {}).values()), returns)
+            if any(source and ('Self' in source or namespace.get(source) is typing.Self)
+                   for source in sources):
+                owner = self.method_self_owner(frame, discover=True)
+        if (frame.f_code.co_name == '<module>' and frame.f_globals is self.interactive_globals
+                and self.interactive_scope is not None):
+            scope = self.interactive_scope
+            scope.declarations.update(declarations)
+        elif (frame.f_code.co_name == '<module>'
+              and (retained := self._module_scopes.get(id(frame.f_globals))) is not None
+              and retained[0] is frame.f_globals):
+            scope = retained[1]
+            scope.declarations.update(declarations)
+        else:
+            scope = Scope(declarations=declarations, self_owner=owner)
+        if scope.self_owner is not None:
+            namespace[SELF_OWNER] = scope.self_owner
+        for name, (source, mode) in (parameters or {}).items():
+            # Unbound variadic type parameters have no concrete element types
+            # to check at this call boundary.
+            contract = (Contract('any', 'Any') if unconstrained_variadic(source, mode, namespace)
+                        else self.contract(source,namespace))
+            if mode == 'args': contract = Contract('tuple_many',source,(contract,))
+            elif mode == 'kwargs':
+                contract = (contract.args[0] if contract.kind == 'unpack_typeddict' else
+                            Contract('dict',source,(compile_contract('str',namespace),contract)))
+            contract.validate(frame.f_locals[name],name,bindings=scope.bindings)
+            scope.contracts[name] = contract
+        if returns:
+            scope.returned = self.contract(returns,namespace)
+        return scope
+
+    def enter_scope(self, declarations, parameters=None, returns=None):
         frame = inspect.currentframe().f_back
         try:
-            scope = Scope(declarations=declarations)
-            namespace = self.namespace(frame)
-            for name, (source, mode) in (parameters or {}).items():
-                contract = self.contract(source,namespace)
-                if mode == 'args': contract = Contract('tuple_many',source,(contract,))
-                elif mode == 'kwargs': contract = Contract('dict',source,(compile_contract('str',namespace),contract))
-                contract.validate(frame.f_locals[name],name,bindings=scope.bindings)
-                scope.contracts[name] = contract
-            if returns:
-                scope.returned = self.contract(returns,namespace)
-            return scope
+            scope = self._initialize(frame, declarations, parameters, returns)
+            if frame.f_code.co_name == '<module>':
+                self._module_scopes[id(frame.f_globals)] = (frame.f_globals, scope)
+            _FRAME_SCOPES.set(_FRAME_SCOPES.get() + ((frame, scope),))
         finally:
             del frame
 
-    @staticmethod
-    def scopes(frame):
-        local = frame.f_locals.get(SCOPE)
+    def exit_scope(self):
+        stack = _FRAME_SCOPES.get()
+        _FRAME_SCOPES.set(stack[:-1])
+
+    def enter_generator_scope(self, declarations, parameters=None, returns=None):
+        frame = inspect.currentframe().f_back
+        try:
+            scope = self._initialize(frame, declarations, parameters, returns)
+            with _GENERATOR_SCOPES_LOCK:
+                _GENERATOR_SCOPES[id(frame)] = scope
+        finally:
+            del frame
+
+    def exit_generator_scope(self):
+        frame = inspect.currentframe().f_back
+        try:
+            with _GENERATOR_SCOPES_LOCK:
+                _GENERATOR_SCOPES.pop(id(frame), None)
+        finally:
+            del frame
+
+    def scopes(self, frame):
+        local = frame_scope(frame) or frame.f_locals.get(SCOPE)
         global_scope = frame.f_globals.get(SCOPE)
+        retained = self._module_scopes.get(id(frame.f_globals))
+        if retained is not None and retained[0] is frame.f_globals:
+            global_scope = retained[1]
         scopes = [(local,frame.f_locals)] if isinstance(local,Scope) else []
         if isinstance(global_scope,Scope) and global_scope is not local:
             scopes.append((global_scope,frame.f_globals))
@@ -96,6 +375,10 @@ class TypeRuntime:
         scope = next((s for s,values in candidates if name in s.declarations or name in s.contracts),candidates[0][0])
         source = annotation or scope.declarations.get(name)
         if annotation: scope.declarations[name] = annotation
+        if self._class_field_placeholder(frame, value) or self._enum_class_body(frame):
+            if name in scope.final_names:
+                raise TypeViolation(f'{name}: Final binding cannot be reassigned')
+            return value
         contract = scope.contracts.get(name)
         if contract is None and source:
             contract = self.contract(source,self.namespace(frame))
@@ -108,7 +391,7 @@ class TypeRuntime:
         with self._classes_lock:
             registered = type(value) in self.classes
         if registered:
-            compile_contract(getattr(value,'__orig_class__',type(value)),self.namespace(frame)).validate(value,name)
+            self._validate_instance(value, name, frame)
         return value
 
     def assignment(self,value,name,annotation=None):
@@ -132,36 +415,71 @@ class TypeRuntime:
             return value
         finally: del frame
 
+    def _check_instances(self, candidate, classes, seen, frame):
+        if id(candidate) in seen or id(candidate) in self._active_instance_checks.get():
+            return
+        seen.add(id(candidate))
+        cls = type(candidate)
+        if cls in classes:
+            self._validate_instance(candidate, cls.__qualname__, frame)
+            for base in cls.__mro__:
+                descriptor = vars(base).get('__dict__')
+                if type(descriptor) in (types.GetSetDescriptorType, types.MemberDescriptorType):
+                    try:
+                        state = descriptor.__get__(candidate, cls)
+                    except AttributeError:
+                        break
+                    if type(state) is dict:
+                        self._check_instances(state, classes, seen, frame)
+                    break
+        elif cls in (list, tuple, set, frozenset):
+            for item in candidate:
+                self._check_instances(item, classes, seen, frame)
+        elif cls is dict:
+            for item in candidate.values():
+                self._check_instances(item, classes, seen, frame)
+
+    @staticmethod
+    def _has_class_annotations(cls):
+        # Keep unannotated project classes out of the per-statement scan.
+        # Inspect this at each checkpoint so annotations added later still count.
+        for base in cls.__mro__:
+            members = vars(base)
+            annotation = members.get('__annotations__')
+            cache = members.get('__annotations_cache__')
+            if ((type(annotation) is dict and annotation) or
+                    (type(cache) is dict and cache) or
+                    callable(members.get('__annotate_func__'))):
+                return True
+        return False
+
     def check_frame(self,frame):
         with self._classes_lock:
-            classes = frozenset(self.classes)
+            classes = frozenset(cls for cls in self.classes if self._has_class_annotations(cls))
         if classes:
             seen = set()
-            if frame.f_code.co_name == '__init__' and 'self' in frame.f_locals:
-                seen.add(id(frame.f_locals['self']))
-            def check_instances(candidate):
-                if id(candidate) in seen: return
-                seen.add(id(candidate))
-                cls = type(candidate)
-                if cls in classes:
-                    compile_contract(getattr(candidate,'__orig_class__',cls),self.namespace(frame)).validate(candidate,cls.__qualname__)
-                    try: state = object.__getattribute__(candidate,'__dict__')
-                    except AttributeError: state = {}
-                    check_instances(state)
-                elif cls in (list,tuple,set,frozenset):
-                    for item in candidate: check_instances(item)
-                elif cls is dict:
-                    for item in candidate.values(): check_instances(item)
+            if 'self' in frame.f_locals:
+                receiver = frame.f_locals['self']
+                parent = frame
+                while parent is not None:
+                    if (parent.f_code.co_name in ('__init__', '__setstate__')
+                            and parent.f_locals.get('self') is receiver):
+                        seen.add(id(receiver))
+                        break
+                    parent = parent.f_back
             for namespace in (frame.f_locals,frame.f_globals):
                 for name,candidate in namespace.items():
                     if not name.startswith('__'):
-                        check_instances(candidate)
+                        self._check_instances(candidate, classes, seen, frame)
         for scope, values in self.scopes(frame):
             for name, source in scope.declarations.items():
-                if name in values and name not in scope.contracts:
+                if (name in values and name not in scope.contracts
+                        and not self._class_field_placeholder(frame, values[name])
+                        and not self._enum_class_body(frame, name)):
                     scope.contracts[name] = self.contract(source,self.namespace(frame))
             for name, contract in scope.contracts.items():
-                if name in values:
+                if (name in values and not self._class_field_placeholder(frame, values[name])
+                        and not self._enum_class_body(frame, name)):
                     contract.validate(values[name],name,bindings=scope.bindings)
 
     def checkpoint(self):
@@ -171,7 +489,10 @@ class TypeRuntime:
             # Active enclosing scopes can hold annotated aliases to mutated values.
             parent = frame.f_back
             while parent:
-                if SCOPE in parent.f_locals and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME):
+                unit = self.manager.units.get(parent.f_code.co_filename) if self.manager is not None else None
+                same_runtime = (any(value is self.manager for value in parent.f_code.co_consts) if unit else
+                                self.manager is None and parent.f_globals.get(RUNTIME_NAME) is frame.f_globals.get(RUNTIME_NAME))
+                if (frame_scope(parent) or SCOPE in parent.f_locals) and same_runtime:
                     self.check_frame(parent)
                 parent = parent.f_back
         finally: del frame
@@ -180,7 +501,7 @@ class TypeRuntime:
         frame = inspect.currentframe().f_back
         try:
             self.check_frame(frame)
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if isinstance(scope,Scope) and scope.returned:
                 contract = scope.returned.args[2] if scope.returned.kind in ('generator','async_generator') and frame.f_code.co_flags & (inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR) else scope.returned
                 contract.validate(value,'return',bindings=scope.bindings)
@@ -192,14 +513,14 @@ class TypeRuntime:
     def aborted(self):
         frame = inspect.currentframe().f_back
         try:
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if isinstance(scope,Scope): scope.failed = True
         finally: del frame
 
     def leaving(self):
         frame = inspect.currentframe().f_back
         try:
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if not isinstance(scope,Scope) or scope.failed:
                 return
             self.check_frame(frame)
@@ -212,7 +533,7 @@ class TypeRuntime:
         frame = inspect.currentframe().f_back
         try:
             self.check_frame(frame)
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if isinstance(scope,Scope) and scope.returned:
                 if scope.returned.kind not in ('generator','async_generator'):
                     raise TypeViolation('Generator return annotation must describe yielded values')
@@ -223,7 +544,7 @@ class TypeRuntime:
     def sent(self,value):
         frame = inspect.currentframe().f_back
         try:
-            scope = frame.f_locals.get(SCOPE)
+            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
             if isinstance(scope,Scope) and scope.returned:
                 scope.returned.args[1].validate(value,'send',bindings=scope.bindings)
             return value
@@ -231,7 +552,7 @@ class TypeRuntime:
 
     def delegate(self,iterable):
         frame = inspect.currentframe().f_back
-        scope = frame.f_locals.get(SCOPE)
+        scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
         del frame
         contract = scope.returned if isinstance(scope,Scope) else None
         iterator = iter(iterable)
@@ -262,34 +583,46 @@ class TypeRuntime:
                     except StopIteration as stop: return stop.value
         return checked()
 
+    def validate_attribute(self, frame, owner, name, value, annotation=None):
+        if annotation:
+            contract = compile_contract(annotation,self.namespace(frame))
+        else:
+            target = owner if issubclass(type(owner), type) else type(owner)
+            fields = {}
+            for base in reversed(target.__mro__):
+                fields.update(annotations_of(base))
+            source = fields.get(name)
+            contract = None
+            if source:
+                scope = self.namespace(frame)
+                if not descriptor_field(target, name, source, scope):
+                    namespace = Compiler.module_names(target, scope)
+                    namespace[SELF_OWNER] = target
+                    namespace.update({p.__name__:p for p in class_parameters(target)})
+                    contract = compile_contract(source,namespace)
+        if contract:
+            if contract.marker == 'ClassVar' and not issubclass(type(owner), type):
+                raise TypeViolation(f'{name}: ClassVar must be assigned on the class')
+            if contract.marker == 'Final':
+                try: inspect.getattr_static(owner,name)
+                except AttributeError: pass
+                else: raise TypeViolation(f'{name}: Final attribute cannot be reassigned')
+            contract.validate(value,f'{type(owner).__name__}.{name}')
+
     def assign_attribute(self,owner,name,value,annotation=None):
         frame = inspect.currentframe().f_back
         try:
-            if annotation:
-                contract = compile_contract(annotation,self.namespace(frame))
-            else:
-                target = owner if isinstance(owner,type) else type(owner)
-                fields = {}
-                for base in reversed(target.__mro__):
-                    fields.update(annotations_of(base))
-                source = fields.get(name)
-                namespace = Compiler.module_names(target,self.namespace(frame))
-                namespace.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
-                contract = compile_contract(source,namespace) if source else None
-            if contract:
-                if contract.marker == 'ClassVar' and not isinstance(owner,type):
-                    raise TypeViolation(f'{name}: ClassVar must be assigned on the class')
-                if contract.marker == 'Final':
-                    try: inspect.getattr_static(owner,name)
-                    except AttributeError: pass
-                    else: raise TypeViolation(f'{name}: Final attribute cannot be reassigned')
-                contract.validate(value,f'{type(owner).__name__}.{name}')
+            self.validate_attribute(frame, owner, name, value, annotation)
             setattr(owner,name,value)
+            if issubclass(type(owner), type):
+                member = type.__getattribute__(owner, '__dict__').get(name)
+                with self._classes_lock:
+                    self._track_method(owner, member)
         finally: del frame
 
 
-def helper(name,*args):
-    return ast.Call(ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),name,ast.Load()),list(args),[])
+def helper(name,*args,runtime_name=RUNTIME_NAME):
+    return ast.Call(ast.Attribute(ast.Attribute(ast.Name(runtime_name,ast.Load()),'types',ast.Load()),name,ast.Load()),list(args),[])
 
 
 def literal(value):
@@ -297,11 +630,23 @@ def literal(value):
 
 
 class TypedTransformer(ast.NodeTransformer):
-    def __init__(self, *, snippet=False):
+    def __init__(self, *, snippet=False, runtime_name=RUNTIME_NAME):
         self.snippet = snippet
+        self.runtime_name = runtime_name
         self.declarations = {}
         self.function = False
-        self.temp = 0
+        self.delegation_contract = False
+        self.class_name = None
+
+    def helper(self, name, *args):
+        return helper(name, *args, runtime_name=self.runtime_name)
+
+    def attribute_name(self, name):
+        if self.class_name is not None and name.startswith('__') and not name.endswith('__'):
+            prefix = self.class_name.lstrip('_')
+            if prefix:
+                return f'_{prefix}{name}'
+        return name
 
     @staticmethod
     def declarations_in(body):
@@ -314,7 +659,7 @@ class TypedTransformer(ast.NodeTransformer):
         for statement in body: collect(statement)
         return result
 
-    def body(self,body,*,parameters=None,returns=None,initialize=True,inherited=None):
+    def body(self,body,*,parameters=None,returns=None,initialize=True,inherited=None,generator_scope=False):
         previous = self.declarations
         self.declarations = dict(inherited or {}) | self.declarations_in(body)
         output = []
@@ -324,13 +669,21 @@ class TypedTransformer(ast.NodeTransformer):
         while body and isinstance(body[0],ast.ImportFrom) and body[0].module == '__future__':
             header.append(body[0]); body = body[1:]
         if initialize:
-            initial = ast.Assign([ast.Name(SCOPE,ast.Store())],helper('initialize',literal(self.declarations),literal(parameters),literal(returns)))
+            initial = ast.Expr(self.helper('enter_generator_scope' if generator_scope else 'enter_scope',
+                                      literal(self.declarations),literal(parameters),literal(returns)))
             ast.copy_location(initial,body[0] if body else header[-1] if header else ast.Constant(None,lineno=1,col_offset=0))
+            initial._aiython_scope_initializer = True
             output.append(initial)
         # Capture lexical types used only in stringified contracts without executing them.
         names = set()
         for source in list(self.declarations.values()) + [p[0] for p in (parameters or {}).values()] + ([returns] if returns else []):
-            names.update(n.id for n in ast.walk(ast.parse(source,mode='eval')) if isinstance(n,ast.Name))
+            try:
+                annotation = ast.parse(source, mode='eval')
+            except SyntaxError:
+                # Variadic parameter annotations such as *args: *Ts need a
+                # subscription context; their unparsed text is not an expression.
+                annotation = ast.parse(f'tuple[{source}]', mode='eval')
+            names.update(n.id for n in ast.walk(annotation) if isinstance(n,ast.Name))
         if self.function and names:
             capture = ast.If(ast.Constant(False),[ast.Expr(ast.Tuple([ast.Name(n,ast.Load()) for n in sorted(names)],ast.Load()))],[])
             ast.copy_location(capture,body[0] if body else output[0])
@@ -339,16 +692,34 @@ class TypedTransformer(ast.NodeTransformer):
             transformed = self.visit(statement)
             output.extend(transformed if isinstance(transformed,list) else [transformed])
             if not isinstance(statement,(ast.Return,ast.Raise,ast.Break,ast.Continue)):
-                output.append(ast.copy_location(ast.Expr(helper('checkpoint')),statement))
+                output.append(ast.copy_location(ast.Expr(self.helper('checkpoint')),statement))
         self.declarations = previous
         return header+output
 
     def visit_Module(self,node):
-        node.body = self.body(node.body,initialize=not self.snippet)
+        if self.snippet:
+            node.body = self.body(node.body,initialize=False)
+            return node
+        body = self.body(node.body)
+        initial = next(i for i,item in enumerate(body) if getattr(item,'_aiython_scope_initializer',False))
+        header, enter, statements = body[:initial], body[initial], body[initial+1:]
+        exit_call = ast.copy_location(ast.Expr(self.helper('exit_scope')), enter)
+        if statements:
+            guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), enter)
+            guard._aiython_module_guard = True
+            node.body = header + [enter, guard]
+        else:
+            node.body = header + [enter, exit_call]
         return node
 
     def visit_FunctionDef(self,node):
+        if getattr(node, 'type_params', ()):
+            last = node.decorator_list[-1] if node.decorator_list else node
+            register = ast.Attribute(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'types',ast.Load()),
+                                     'register_function',ast.Load())
+            node.decorator_list.append(ast.copy_location(register, last))
         previous = self.function
+        previous_contract = self.delegation_contract
         parent_declarations = dict(self.declarations) if previous else {}
         self.function = True
         parameters = {}
@@ -357,25 +728,30 @@ class TypedTransformer(ast.NodeTransformer):
         for arg, mode in ((node.args.vararg,'args'),(node.args.kwarg,'kwargs')):
             if arg and arg.annotation: parameters[arg.arg] = (ast.unparse(arg.annotation),mode)
         returns = ast.unparse(node.returns) if node.returns else None
+        self.delegation_contract = returns is not None
         # Generator annotations require yield/send checks, not return-only checks.
         is_generator = any(isinstance(n,(ast.Yield,ast.YieldFrom)) for n in self.function_nodes(node))
         used = {n.id for n in self.function_nodes(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Load)}
         nonlocal_names = {name for n in self.function_nodes(node) if isinstance(n,ast.Nonlocal) for name in n.names}
         assigned = {n.id for n in self.function_nodes(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store)} - nonlocal_names
         inherited = {name:source for name,source in parent_declarations.items() if name in (used|nonlocal_names) and name not in assigned and name not in parameters}
-        node.body = self.body(node.body,parameters=parameters,returns=returns,inherited=inherited)
+        node.body = self.body(node.body,parameters=parameters,returns=returns,
+                              inherited=inherited,generator_scope=is_generator)
         if isinstance(node,ast.AsyncFunctionDef) and is_generator:
-            node.body.append(ast.copy_location(ast.Expr(helper('returned',ast.Constant(None))),node))
+            node.body.append(ast.copy_location(ast.Expr(self.helper('returned',ast.Constant(None))),node))
         else:
-            node.body.append(ast.copy_location(ast.Return(helper('returned',ast.Constant(None))),node))
-        initial = next(i for i,n in enumerate(node.body) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id == SCOPE for t in n.targets))
-        handler = ast.ExceptHandler(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'error_type',ast.Load()),None,
-                                    [ast.Expr(helper('aborted')),ast.Raise()])
-        guarded = ast.Try(node.body[initial+1:],[handler],[],[ast.Expr(helper('leaving'))])
+            node.body.append(ast.copy_location(ast.Return(self.helper('returned',ast.Constant(None))),node))
+        initial = next(i for i,n in enumerate(node.body) if getattr(n,'_aiython_scope_initializer',False))
+        handler = ast.ExceptHandler(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'scope_error_type',ast.Load()),None,
+                                    [ast.Expr(self.helper('aborted')),ast.Raise()])
+        final = ast.Expr(self.helper('leaving'))
+        final = ast.Try([final],[],[],[ast.Expr(self.helper('exit_generator_scope' if is_generator else 'exit_scope'))])
+        guarded = ast.Try(node.body[initial+1:],[handler],[],[final])
         guarded._aiython_type_guard = True
         ast.copy_location(guarded,node)
         node.body = node.body[:initial+1] + [guarded]
         self.function = previous
+        self.delegation_contract = previous_contract
         return node
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -388,58 +764,99 @@ class TypedTransformer(ast.NodeTransformer):
             yield from TypedTransformer.function_nodes(child)
 
     def visit_ClassDef(self,node):
-        node.decorator_list.insert(0, ast.Attribute(ast.Attribute(ast.Name(RUNTIME_NAME,ast.Load()),'types',ast.Load()),'register_class',ast.Load()))
+        first = node.decorator_list[0] if node.decorator_list else node
+        register = ast.Attribute(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'types',ast.Load()),
+                                 'register_class',ast.Load())
+        node.decorator_list.insert(0, ast.copy_location(register, first))
         previous = self.function
+        previous_contract = self.delegation_contract
+        previous_class = self.class_name
         self.function = False
-        node.body = self.body(node.body)
+        self.delegation_contract = False
+        self.class_name = node.name
+        body = self.body(node.body)
+        header = body[:1] if isinstance(body[0],ast.Expr) and isinstance(body[0].value,ast.Constant) and isinstance(body[0].value.value,str) else []
+        enter, *statements = body[len(header):]
+        exit_call = ast.copy_location(ast.Expr(self.helper('exit_scope')), node)
+        if statements:
+            guard = ast.copy_location(ast.Try(statements, [], [], [exit_call]), node)
+            guard._aiython_class_guard = True
+            node.body = header + [enter, guard]
+        else:
+            node.body = header + [enter, exit_call]
         self.function = previous
+        self.delegation_contract = previous_contract
+        self.class_name = previous_class
+        return node
+
+    def visit_Lambda(self,node):
+        previous_contract = self.delegation_contract
+        self.delegation_contract = False
+        node = self.generic_visit(node)
+        self.delegation_contract = previous_contract
         return node
 
     def visit_Return(self,node):
         if node.value is None:
-            return [ast.copy_location(ast.Expr(helper('returned',ast.Constant(None))),node),node]
-        node.value = helper('returned',self.visit(node.value))
+            return [ast.copy_location(ast.Expr(self.helper('returned',ast.Constant(None))),node),node]
+        node.value = self.helper('returned',self.visit(node.value))
         return node
 
     def visit_Yield(self,node):
         value = self.visit(node.value) if node.value else ast.Constant(None)
-        node.value = helper('yielded',value)
-        return ast.copy_location(helper('sent',node),node)
+        node.value = self.helper('yielded',value)
+        return ast.copy_location(self.helper('sent',node),node)
 
     def visit_YieldFrom(self,node):
-        node.value = helper('delegate',self.visit(node.value))
+        node.value = self.visit(node.value)
+        if self.delegation_contract:
+            node.value = self.helper('delegate',node.value)
         return node
 
     def visit_AnnAssign(self,node):
         if node.value is None: return node
         annotation = ast.unparse(node.annotation)
         if isinstance(node.target,ast.Name):
-            node.value = helper('assignment',self.visit(node.value),ast.Constant(node.target.id),ast.Constant(annotation))
+            node.value = self.helper('assignment',self.visit(node.value),ast.Constant(node.target.id),ast.Constant(annotation))
             return node
-        node.value = helper('expression',self.visit(node.value),ast.Constant(annotation))
-        return node
+        if self.function and isinstance(node.target, ast.Attribute):
+            assignment = ast.Call(
+                ast.Attribute(ast.Attribute(ast.Name(self.runtime_name, ast.Load()), 'types', ast.Load()),
+                              'assign_attribute', ast.Load()), [], [
+                    ast.keyword(arg='value', value=self.visit(node.value)),
+                    ast.keyword(arg='owner', value=self.visit(node.target.value)),
+                    ast.keyword(arg='name', value=ast.Constant(self.attribute_name(node.target.attr))),
+                    ast.keyword(arg='annotation', value=ast.Constant(annotation)),
+                ])
+            return ast.copy_location(ast.Expr(assignment), node)
+        # Python evaluates a non-name target before its annotation. Function
+        # scopes do not evaluate these annotations at all. Let CPython keep
+        # those rules for attribute and subscript assignments.
+        return self.generic_visit(node)
 
     def visit_Assign(self,node):
         node.value = self.visit(node.value)
         if len(node.targets) == 1 and isinstance(node.targets[0],ast.Attribute):
             target = node.targets[0]
-            self.temp += 1
-            temporary = f'__aiython_typed_value_{self.temp}'
-            store = ast.copy_location(ast.Assign([ast.Name(temporary,ast.Store())],node.value),node)
-            assign = ast.copy_location(ast.Expr(helper('assign_attribute',self.visit(target.value),ast.Constant(target.attr),ast.Name(temporary,ast.Load()))),node)
-            clean = ast.copy_location(ast.Delete([ast.Name(temporary,ast.Del())]),node)
-            return [store,assign,clean]
+            assign = ast.Call(
+                ast.Attribute(ast.Attribute(ast.Name(self.runtime_name,ast.Load()),'types',ast.Load()),
+                              'assign_attribute',ast.Load()), [], [
+                    ast.keyword(arg='value',value=node.value),
+                    ast.keyword(arg='owner',value=self.visit(target.value)),
+                    ast.keyword(arg='name',value=ast.Constant(self.attribute_name(target.attr))),
+                ])
+            return ast.copy_location(ast.Expr(assign),node)
         for target in node.targets:
-            if isinstance(target,ast.Name) and not target.id.startswith('__aiython_'):
-                node.value = helper('assignment',node.value,ast.Constant(target.id))
+            if isinstance(target,ast.Name):
+                node.value = self.helper('assignment',node.value,ast.Constant(target.id))
         return node
 
     def visit_AugAssign(self,node):
         names = [node.target.id] if isinstance(node.target,ast.Name) else []
-        return [ast.copy_location(ast.Expr(helper('reassigning',literal(names))),node),node]
+        return [ast.copy_location(ast.Expr(self.helper('reassigning',literal(names))),node),node]
 
     def visit_NamedExpr(self,node):
-        node.value = helper('assignment',self.visit(node.value),ast.Constant(node.target.id))
+        node.value = self.helper('assignment',self.visit(node.value),ast.Constant(node.target.id))
         return node
 
     def visit_If(self,node):
@@ -454,12 +871,12 @@ class TypedTransformer(ast.NodeTransformer):
             result = self.visit(statement)
             output.extend(result if isinstance(result,list) else [result])
             if not isinstance(statement,(ast.Return,ast.Raise,ast.Break,ast.Continue)):
-                output.append(ast.copy_location(ast.Expr(helper('checkpoint')),statement))
+                output.append(ast.copy_location(ast.Expr(self.helper('checkpoint')),statement))
         return output
 
     def visit_For(self,node):
         node.iter = self.visit(node.iter)
-        node.body = [ast.copy_location(ast.Expr(helper('checkpoint')),node)] + self.nested(node.body)
+        node.body = [ast.copy_location(ast.Expr(self.helper('checkpoint')),node)] + self.nested(node.body)
         node.orelse = self.nested(node.orelse)
         return node
     visit_AsyncFor = visit_For
@@ -471,7 +888,7 @@ class TypedTransformer(ast.NodeTransformer):
 
     def visit_With(self,node):
         node.items = [self.visit(item) for item in node.items]
-        node.body = [ast.copy_location(ast.Expr(helper('checkpoint')),node)] + self.nested(node.body)
+        node.body = [ast.copy_location(ast.Expr(self.helper('checkpoint')),node)] + self.nested(node.body)
         return node
     visit_AsyncWith = visit_With
 
@@ -485,8 +902,9 @@ class TypedTransformer(ast.NodeTransformer):
 
 class ExpectedTypes(ast.NodeVisitor):
     """Propagate declared contracts to direct AI values before code generation."""
-    def __init__(self,blocks):
+    def __init__(self,blocks,runtime_name=RUNTIME_NAME):
         self.blocks = blocks
+        self.runtime_name = runtime_name
         self.declarations = {}
         self.returns = None
         self.functions = {}
@@ -499,7 +917,7 @@ class ExpectedTypes(ast.NodeVisitor):
     def apply(self,node,annotation):
         if node is None or not annotation: return
         if (isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute)
-            and isinstance(node.func.value,ast.Name) and node.func.value.id == RUNTIME_NAME
+            and isinstance(node.func.value,ast.Name) and node.func.value.id == self.runtime_name
             and node.func.attr == 'execute' and node.args and isinstance(node.args[0],ast.Constant)):
             self.blocks[node.args[0].value].output_type = annotation
         elif isinstance(node,ast.IfExp):

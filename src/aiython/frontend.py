@@ -13,6 +13,15 @@ from .models import SourceSpan
 RUNTIME_NAME = "__aiython_runtime__"
 
 
+def runtime_binding_name(source: str, reserved=()) -> str:
+    name = RUNTIME_NAME
+    index = 1
+    while name in source or name in reserved:
+        name = f"__aiython_runtime_{index}__"
+        index += 1
+    return name
+
+
 @dataclass
 class Block:
     id: str
@@ -32,6 +41,7 @@ class Unit:
     directives: Directives
     blocks: dict[str, Block]
     transformed: str
+    runtime_name: str = RUNTIME_NAME
 
 
 class Frontend:
@@ -44,6 +54,7 @@ class Frontend:
     def __init__(self, source: str, filename: str):
         self.source = source
         self.filename = filename
+        self.runtime_name = runtime_binding_name(source)
         self.lines = source.splitlines(keepends=True)
         self.offsets = [0]
         for line in self.lines:
@@ -66,7 +77,7 @@ class Frontend:
         for block in sorted(blocks, key=lambda b: b.start):
             pieces.append(self.source[cursor:block.start])
             mapping.extend(range(cursor, block.start))
-            call = f"{RUNTIME_NAME}.execute({block.id!r})"
+            call = f"{self.runtime_name}.execute({block.id!r})"
             count = self.source[block.start:block.end].count("\n")
             replacement = "(" + call + "\n" * count + ")" if count else call
             pieces.append(replacement)
@@ -261,7 +272,7 @@ class Frontend:
                 text, source_map = self.render(proposed)
                 # A syntactically valid edit inside string text is not a runtime
                 # call (notably when deleting an f-string brace). Reject it.
-                real_calls = sum(t.type == tokenize.NAME and t.string == RUNTIME_NAME
+                real_calls = sum(t.type == tokenize.NAME and t.string == self.runtime_name
                                  for t in tolerant_tokens(text))
                 if sys.version_info < (3, 12):
                     legacy_fields = set(self.legacy_fstring_candidates())
@@ -287,7 +298,8 @@ class Frontend:
         if not blocks:
             tree = ast.parse(self.source, self.filename)
             self.directives.bind(tree)
-            return Unit(self.source, self.filename, tree, self.directives, {}, self.source)
+            return Unit(self.source, self.filename, tree, self.directives, {}, self.source,
+                        self.runtime_name)
         # Mark standalone calls, then combine consecutive invalid statements.
         tree = ast.parse(rendered, self.filename)
         standalone = {}
@@ -341,12 +353,11 @@ class Frontend:
                         child.end_col_offset = len(self.lines[block.span.end_line - 1][:block.span.end_column].encode("utf-8"))
         self.directives.bind(tree)
         return Unit(self.source, self.filename, tree, self.directives,
-                    {b.id: b for b in merged}, rendered)
+                    {b.id: b for b in merged}, rendered, self.runtime_name)
 
-    @staticmethod
-    def is_call(node: ast.AST) -> bool:
+    def is_call(self, node: ast.AST) -> bool:
         return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == RUNTIME_NAME
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == self.runtime_name
                 and node.func.attr == "execute" and bool(node.args)
                 and isinstance(node.args[0], ast.Constant))
 

@@ -1,3 +1,4 @@
+import builtins
 import contextlib
 import importlib.metadata
 import io
@@ -6,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,15 +17,326 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 from aiython.config import CAPABILITIES, credential, resolve
+from aiython.cli import main, run_repl, run_script
+from aiython import cli
 from aiython.models import ConfigError
 from aiython.setup import ModelChoice, _catalog, _choose_model, setup
 
 
 class CLITests(unittest.TestCase):
-    def test_cli_without_arguments_shows_first_run_help(self):
-        result = subprocess.run([sys.executable, "-m", "aiython"], capture_output=True, text=True)
+    def test_module_source_restores_parent_attribute_after_static_import(self):
+        parent = types.ModuleType('temporary_parent')
+        child = types.ModuleType('temporary_parent.child')
+        secondary_parent = types.ModuleType('temporary_secondary_parent')
+        secondary_child = types.ModuleType('temporary_secondary_parent.child')
+        secondary_parent.child = secondary_child
+        previous = object()
+        parent.child = previous
+        finder = types.SimpleNamespace(static_modules=[
+            (secondary_child, secondary_parent, 'child', False, None),
+            (child, parent, 'child', True, previous)])
+
+        def details(name):
+            parent.child = child
+            sys.modules[child.__name__] = child
+            return types.SimpleNamespace(name=name, origin='<module>', loader=None), 'pass', None
+
+        try:
+            with patch.object(cli, 'ModuleStartFinder', return_value=finder), \
+                    patch.object(cli, 'module_details', side_effect=details):
+                cli.module_source(child.__name__, runtime=object())
+            self.assertIs(parent.child, previous)
+            self.assertNotIn(child.__name__, sys.modules)
+            self.assertFalse(hasattr(secondary_parent, 'child'))
+        finally:
+            sys.modules.pop(child.__name__, None)
+
+    def test_repl_startup_reports_open_compile_and_execution_errors(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            startup = Path(directory) / 'startup.py'
+            startup.write_text('answer = 1\n')
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(Path(directory) / 'missing.py')}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                run_repl(restore_state=True)
+            self.assertIn('Could not open PYTHONSTARTUP', errors.getvalue())
+
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    patch('aiython.cli.Runtime.compile_source', side_effect=SyntaxError('bad startup')), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                run_repl(restore_state=True)
+            self.assertIn('SyntaxError', errors.getvalue())
+
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    patch('aiython.repl.AiythonConsole.runcode', side_effect=RuntimeError('startup failed')), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                run_repl(restore_state=True)
+            self.assertIn('startup failed', errors.getvalue())
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    patch('aiython.repl.AiythonConsole.runcode', side_effect=SystemExit(4)):
+                with self.assertRaises(SystemExit):
+                    run_repl(restore_state=True)
+
+    def test_existing_interactive_host_state_is_restored(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        sentinel = object()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'script.py'
+            path.write_text('answer = 1\n')
+            with patch.dict(vars(builtins), {'_': sentinel}), \
+                    patch.dict(vars(sys), {'last_type': sentinel, 'last_value': sentinel,
+                                           'last_exc': sentinel, 'last_traceback': sentinel}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    patch('aiython.repl.AiythonConsole.interact'):
+                run_script(path, interactive=True)
+                self.assertIs(builtins._, sentinel)
+                self.assertTrue(all(getattr(sys, name) is sentinel for name in
+                                    ('last_type', 'last_value', 'last_exc', 'last_traceback')))
+                run_repl(restore_state=True)
+                self.assertIs(builtins._, sentinel)
+                self.assertTrue(all(getattr(sys, name) is sentinel for name in
+                                    ('last_type', 'last_value', 'last_exc', 'last_traceback')))
+
+    def test_explain_requires_input_and_module_syntax_error_keeps_origin(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with patch.object(sys, 'stdin', Terminal()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main(['--explain'])
+        with patch.object(cli, 'module_source', side_effect=SyntaxError('missing filename')):
+            with self.assertRaisesRegex(SyntaxError, 'missing filename'):
+                main(['-m', 'missing_module'])
+
+    def test_nonembedded_repl_finishes_at_process_exit(self):
+        source = ('from unittest.mock import patch\n'
+                  'from aiython.cli import run_repl\n'
+                  "with patch('aiython.repl.AiythonConsole.interact'):\n"
+                  '    run_repl()\n')
+        result = subprocess.run([sys.executable, '-c', source],
+                                capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("aiython setup", result.stdout)
+
+    def test_repl_safe_path_and_missing_host_main_restore(self):
+        source = ('import sys\n'
+                  'from unittest.mock import patch\n'
+                  'from aiython.cli import run_repl\n'
+                  "sys.modules.pop('__main__', None)\n"
+                  "with patch('aiython.repl.AiythonConsole.interact'):\n"
+                  '    run_repl(restore_state=True)\n')
+        result = subprocess.run([sys.executable, '-P', '-c', source],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_interactive_error_on_legacy_version_skips_last_exc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'error.py'
+            path.write_text('raise ValueError("boom")\n')
+            for version in ((3, 11), (3, 14)):
+                with self.subTest(version=version), patch.object(sys, 'version_info', version), \
+                        patch('aiython.repl.AiythonConsole.interact'), \
+                        patch.object(sys, 'excepthook'):
+                    run_script(path, interactive=True)
+
+    def test_host_execution_error_without_script_frame_is_propagated(self):
+        source = ('from pathlib import Path\n'
+                  'from unittest.mock import patch\n'
+                  'from aiython import cli\n'
+                  'from aiython.models import ResolvedConfig\n'
+                  'config = ResolvedConfig(None, Path.cwd())\n'
+                  'code = compile("pass", "<entry>", "exec")\n'
+                  'def fail(*args):\n'
+                  '    raise ValueError("outside script")\n'
+                  'with patch.object(cli, "exec", fail, create=True), patch.object(cli.atexit, "register"):\n'
+                  '    try:\n'
+                  '        cli.run_script(Path("entry.py"), config=config, compiled_code=code, '
+                  'restore_state=False)\n'
+                  '    except ValueError as error:\n'
+                  '        assert str(error) == "outside script"\n'
+                  '    else:\n'
+                  '        raise AssertionError("host error was swallowed")\n')
+        result = subprocess.run([sys.executable, '-c', source], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cli_without_arguments_opens_repl_on_terminal(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        output = io.StringIO()
+        errors = io.StringIO()
+        original = (sys.argv, sys.orig_argv, sys.path[:], sys.modules['__main__'])
+        with patch.object(sys, 'stdin', Terminal('value: int = 2\nprint(value)\nvalue = 3\nprint(value)\n')), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            main([])
+        self.assertIn('2\n', output.getvalue())
+        self.assertIn('3\n', output.getvalue())
+        self.assertNotIn('>>>', output.getvalue())
+        self.assertIn('Python ', errors.getvalue())
+        self.assertIn('>>>', errors.getvalue())
+        self.assertIs(sys.argv, original[0])
+        self.assertIs(sys.orig_argv, original[1])
+        self.assertEqual(sys.path, original[2])
+        self.assertIs(sys.modules['__main__'], original[3])
+
+    def test_repl_main_module_metadata_matches_python(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        source = ('import sys\n'
+                  "snapshot = (__name__, __package__, __spec__, sys.argv[:], "
+                  "sys.orig_argv[:], '__file__' in globals(), sys.path[0])\n")
+        with patch.object(sys, 'stdin', Terminal(source)), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            namespace = run_repl(restore_state=True)
+        name, package, spec, argv, orig_argv, has_file, path = namespace['snapshot']
+        self.assertEqual((name, package, spec, argv, has_file),
+                         ('__main__', None, None, [''], False))
+        self.assertEqual(orig_argv[0], sys.executable)
+        if not sys.flags.safe_path:
+            self.assertEqual(path, '')
+
+    def test_embedded_repl_restores_host_exception_state(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        names = ('last_type', 'last_value', 'last_exc', 'last_traceback')
+        previous = {name: (name in vars(sys), vars(sys).get(name)) for name in names}
+        previous_underscore = ('_' in vars(builtins), vars(builtins).get('_'))
+        output = io.StringIO()
+        with patch.object(sys, 'stdin', Terminal('value: int = "bad"\n'
+                                                 'import sys\n'
+                                                 "print(type(getattr(sys, 'last_exc', sys.last_value)).__name__)\n"
+                                                 '2\n')), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            run_repl(restore_state=True)
+        self.assertIn('TypeViolation\n', output.getvalue())
+        self.assertIn('2\n', output.getvalue())
+        self.assertEqual({name: (name in vars(sys), vars(sys).get(name)) for name in names}, previous)
+        self.assertEqual(('_' in vars(builtins), vars(builtins).get('_')), previous_underscore)
+
+    def test_repl_runs_python_startup_in_interactive_namespace(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            startup = Path(directory) / 'startup.py'
+            startup.write_text('startup_value: int = 4\n'
+                               "startup_file = __file__\n")
+            terminal = Terminal('answer = startup_value + 1\n'
+                                "startup_value = 'bad'\n")
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', terminal), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                namespace = run_repl(restore_state=True)
+            self.assertEqual(namespace['answer'], 5)
+            self.assertEqual(namespace['startup_file'], str(startup))
+            self.assertNotIn('__file__', namespace)
+            self.assertIn('TypeViolation', errors.getvalue())
+
+    def test_repl_continues_after_python_startup_encoding_error(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            startup = Path(directory) / 'startup.py'
+            startup.write_text('# coding: does-not-exist\n')
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', Terminal('answer = 3\n')), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                namespace = run_repl(restore_state=True)
+            self.assertEqual(namespace['answer'], 3)
+            self.assertIn('SyntaxError', errors.getvalue())
+            self.assertNotIn('run_repl', errors.getvalue())
+
+    def test_repl_options_and_piped_stdin_without_script(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with patch.object(sys, 'stdin', Terminal()), patch('aiython.cli.run_repl') as start:
+            main(['--config', 'settings.toml', '--profile', 'chosen', '--stats'])
+        start.assert_called_once_with(config_path='settings.toml', profile='chosen',
+                                      force_profile=None, stats=True, trace_plan=False,
+                                      restore_state=True)
+
+        errors = io.StringIO()
+        with patch.object(sys, 'stdin', Terminal('print("ready")\n')), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+            run_repl(stats=True, restore_state=True)
+        self.assertIn('aiython run stats:', errors.getvalue())
+
+        result = subprocess.run([sys.executable, '-m', 'aiython', '--stats'],
+                                input='import sys\nprint(sys.argv)\n',
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "['']\n")
+        self.assertIn('aiython run stats:', result.stderr)
+
+    def test_interactive_script_keeps_values_and_type_scope(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'main.py'
+            path.write_text('value: int = 2\n')
+            output, errors = io.StringIO(), io.StringIO()
+            previous_underscore = ('_' in vars(builtins), vars(builtins).get('_'))
+            previous_last = {name: (name in vars(sys), vars(sys).get(name))
+                             for name in ('last_type', 'last_value', 'last_exc', 'last_traceback')}
+            with patch.object(sys, 'stdin', Terminal('answer = value + 1\n'
+                                                       "value = 'bad'\n"
+                                                       "print(answer, value, '__file__' in globals())\n"
+                                                       'answer\n')), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                namespace = run_script(path, interactive=True)
+            self.assertEqual(namespace['answer'], 3)
+            self.assertIn('3 2 False', output.getvalue())
+            self.assertIn('TypeViolation', errors.getvalue())
+            self.assertEqual({name: (name in vars(sys), vars(sys).get(name))
+                              for name in previous_last}, previous_last)
+            self.assertEqual(('_' in vars(builtins), vars(builtins).get('_')), previous_underscore)
+
+    def test_interactive_flag_enters_console_after_script_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'main.py'
+            path.write_text('value = 3\nraise SystemExit(2)\n')
+            result = subprocess.run([sys.executable, '-m', 'aiython', '-i', str(path)],
+                                    input=('import sys\n'
+                                           "print(value, type(getattr(sys, 'last_exc', sys.last_value)).__name__, "
+                                           "hasattr(sys, 'last_exc'))\n"),
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f'3 SystemExit {sys.version_info >= (3, 12)}\n', result.stdout)
+            self.assertIn('SystemExit: 2', result.stderr)
+            self.assertNotIn('in run_script', result.stderr)
 
     def test_cli_version_uses_distribution_metadata(self):
         result = subprocess.run([sys.executable, "-m", "aiython", "--version"], capture_output=True, text=True)

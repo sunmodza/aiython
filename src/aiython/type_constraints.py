@@ -8,15 +8,19 @@ from __future__ import annotations
 import ast
 import builtins
 import collections.abc as abc
+from collections import ChainMap, Counter, OrderedDict, defaultdict, deque
+import contextlib
 from dataclasses import dataclass, field
 import dataclasses
 import enum
 from functools import lru_cache
+import io
 import inspect
+import re
 import sys
 import types
 import typing
-from typing_extensions import ReadOnly, TypeAliasType
+from typing_extensions import ReadOnly, TypeAlias, TypeAliasType, TypeGuard, TypeIs
 
 try:
     import annotationlib
@@ -26,9 +30,37 @@ except ModuleNotFoundError:  # Python 3.11–3.13
 from .capabilities import CapabilityError
 
 VALIDATORS = {}
+SELF_OWNER = object()
 PRIMITIVE_KINDS = frozenset(('str', 'int', 'float', 'bool', 'bytes', 'complex'))
 TYPE_ALIAS_TYPES = tuple({TypeAliasType, getattr(typing, "TypeAliasType", TypeAliasType)})
 READ_ONLY_TYPES = tuple({ReadOnly, getattr(typing, "ReadOnly", ReadOnly)})
+TYPE_NARROWING_TYPES = tuple({TypeGuard, TypeIs, typing.TypeGuard,
+                              getattr(typing, 'TypeIs', TypeIs)})
+CONCRETE_SEQUENCE_TYPES = {'list':list, 'set':set, 'frozenset':frozenset,
+                           'deque':deque, 'tuple':tuple, 'tuple_many':tuple,
+                           'mutable_set':set}
+CONCRETE_MAPPING_TYPES = {'dict':dict, 'defaultdict':defaultdict,
+                          'ordered_dict':OrderedDict, 'counter':Counter}
+SAFE_MAPPING_TYPES = (dict, defaultdict, OrderedDict, Counter)
+SAFE_COLLECTION_TYPES = (list, tuple, set, frozenset, dict, str, bytes,
+                         bytearray, memoryview, range,
+                         deque, defaultdict, OrderedDict, Counter)
+SAFE_REVERSIBLE_TYPES = (list, tuple, dict, str, bytes, bytearray,
+                         memoryview, range, deque, defaultdict, OrderedDict, Counter)
+SAFE_VIEW_TYPES = {
+    'keys_view': (type({}.keys()), type(OrderedDict().keys())),
+    'values_view': (type({}.values()), type(OrderedDict().values())),
+    'items_view': (type({}.items()), type(OrderedDict().items())),
+}
+SAFE_VIEW_TYPES['mapping_view'] = tuple(kind for group in SAFE_VIEW_TYPES.values() for kind in group)
+CONTAINER_KINDS = {list:'list', set:'set', frozenset:'frozenset', dict:'dict',
+                   deque:'deque', defaultdict:'defaultdict', OrderedDict:'ordered_dict',
+                   Counter:'counter', ChainMap:'chainmap', abc.Sequence:'sequence', abc.Mapping:'mapping',
+                   abc.MutableMapping:'mutable_mapping', abc.MutableSequence:'mutable_sequence',
+                   abc.Set:'abstract_set', abc.MutableSet:'mutable_set', abc.Collection:'collection',
+                   abc.Container:'container', abc.Reversible:'reversible',
+                   abc.MappingView:'mapping_view', abc.KeysView:'keys_view',
+                   abc.ValuesView:'values_view', abc.ItemsView:'items_view'}
 
 
 class TypeViolation(CapabilityError, TypeError):
@@ -49,6 +81,68 @@ def annotations_of(target):
     return inspect.get_annotations(target, eval_str=False)
 
 
+def class_parameters(target):
+    if not isinstance(target, type):
+        return ()
+    for name in ('__type_params__', '__parameters__'):
+        try:
+            parameters = type.__getattribute__(target, name)
+        except AttributeError:
+            continue
+        if isinstance(parameters, tuple) and parameters:
+            return parameters
+    return ()
+
+
+def annotation_locals(target):
+    if not isinstance(target, type):
+        return {}
+    try:
+        annotator = type.__getattribute__(target, '__annotate__')
+    except AttributeError:
+        return {}
+    if not isinstance(annotator, types.FunctionType):
+        return {}
+    names = {}
+    for name, cell in zip(annotator.__code__.co_freevars, annotator.__closure__ or ()):
+        if name == '__classdict__':
+            continue
+        try:
+            names[name] = cell.cell_contents
+        except ValueError:
+            pass
+    return names
+
+
+def descriptor_field(target, name, source, namespace=None):
+    """Whether an annotation describes the descriptor stored on the class."""
+    try:
+        descriptor = inspect.getattr_static(target, name)
+    except AttributeError:
+        return False
+    kind = type(descriptor)
+    if not any(inspect.getattr_static(kind, method, None) is not None
+               for method in ('__get__', '__set__', '__delete__')):
+        return False
+    if source is kind:
+        return True
+    if not isinstance(source, str):
+        return False
+    try:
+        annotation = ast.parse(source.strip(), mode='eval').body
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            annotation = ast.parse(annotation.value.strip(), mode='eval').body
+    except SyntaxError:
+        return False
+    if isinstance(annotation, ast.Name):
+        if namespace is not None and annotation.id in namespace:
+            return namespace[annotation.id] is kind
+        return annotation.id == kind.__name__
+    if isinstance(annotation, ast.Attribute):
+        return ast.unparse(annotation) == f'{kind.__module__}.{kind.__name__}'
+    return False
+
+
 @dataclass
 class Contract:
     kind: str
@@ -59,6 +153,46 @@ class Contract:
     required: set = field(default_factory=set)
     description: str = ''
     qualifier: str | None = None
+
+    def accepts_class(self, candidate, bindings, seen=None):
+        """Check a class supplied to type[T] without instantiating it."""
+        seen = set() if seen is None else seen
+        if id(self) in seen:
+            return False
+        seen = seen | {id(self)}
+        if self.kind == 'any':
+            return True
+        if self.kind == 'null':
+            return candidate is type(None)
+        if self.kind in ('alias', 'annotated', 'qualifier'):
+            return self.args[0].accepts_class(candidate, bindings, seen)
+        if self.kind == 'union':
+            for option in self.args:
+                branch = dict(bindings)
+                if option.accepts_class(candidate, branch, seen):
+                    bindings.update(branch)
+                    return True
+            return False
+        if self.kind == 'typevar':
+            previous = bindings.get(self.python_type)
+            if previous is not None:
+                return candidate is previous
+            if self.args:
+                for option in self.args:
+                    branch = dict(bindings)
+                    if option.accepts_class(candidate, branch, seen):
+                        bindings.update(branch)
+                        break
+                else:
+                    return False
+            bindings[self.python_type] = candidate
+            return True
+        if not isinstance(self.python_type, type):
+            return False
+        try:
+            return issubclass(candidate, self.python_type)
+        except TypeError:
+            return False
 
     @property
     def marker(self):
@@ -82,25 +216,44 @@ class Contract:
             members = [type(v).__qualname__ + '.' + v.name for v in self.args if isinstance(v,enum.Enum)]
             if members: result['x-python-enum-members'] = members
         elif kind == 'null': result = {'type': 'null'}
+        elif kind == 'callable': result = {'x-python-callable': True}
+        elif kind == 'abc': result = {'x-python-abc': self.name}
+        elif kind == 'io':
+            result = {'x-python-io': self.args[0].name}
+        elif kind in ('pattern', 'match'):
+            result = {'x-python-regex': kind, 'x-python-input-type': self.args[0].schema(seen)}
         elif kind in ('str', 'int', 'float', 'bool'):
             result = {'type': {'str':'string', 'int':'integer', 'float':'number', 'bool':'boolean'}[kind]}
-        elif kind in ('list', 'set', 'frozenset', 'sequence'):
+        elif kind in ('list', 'set', 'frozenset', 'sequence', 'deque',
+                      'mutable_sequence', 'abstract_set', 'mutable_set', 'reversible'):
             result = {'type': 'array', 'items': self.args[0].schema(seen)}
+        elif kind in ('collection', 'container'):
+            result = {'x-python-collection-items': self.args[0].schema(seen)}
+        elif kind in SAFE_VIEW_TYPES:
+            item = (self.args[0].schema(seen) if kind != 'items_view' else
+                    {'type':'array', 'prefixItems':[arg.schema(seen) for arg in self.args],
+                     'minItems':2, 'maxItems':2})
+            result = {'type':'array', 'items':item}
         elif kind == 'tuple':
             result = {'type': 'array', 'prefixItems': [a.schema(seen) for a in self.args],
                       'minItems': len(self.args), 'maxItems': len(self.args)}
+        elif kind == 'tuple_unpacked':
+            pivot = next(index for index, item in enumerate(self.args) if item.kind == 'unpack_any')
+            result = {'type': 'array', 'minItems': len(self.args) - 1,
+                      'prefixItems': [item.schema(seen) for item in self.args[:pivot]],
+                      'x-python-suffixItems': [item.schema(seen) for item in self.args[pivot + 1:]]}
         elif kind == 'tuple_many': result = {'type':'array', 'items':self.args[0].schema(seen)}
-        elif kind in ('dict', 'mapping'):
+        elif kind in ('dict', 'mapping', 'mutable_mapping', 'defaultdict', 'ordered_dict', 'counter', 'chainmap'):
             result = {'type':'object', 'additionalProperties':self.args[1].schema(seen), 'x-key-schema':self.args[0].schema(seen)}
         elif kind == 'class' and isinstance(self.python_type,type) and issubclass(self.python_type,enum.Enum):
             values = [v.value for v in self.python_type]
             if any(type(v) not in (str,int,bool,float,type(None)) for v in values):
                 raise UnsupportedType('Enum schema requires scalar member values')
             result = {'enum': values, 'x-python-enum-members': list(self.python_type.__members__)}
-        elif kind in ('typeddict', 'class') and self.fields:
+        elif kind == 'typeddict' or (kind == 'class' and self.fields):
             result = {'type':'object', 'properties':{k:v.schema(seen) for k,v in self.fields.items()},
                       'required': sorted(self.required)}
-        elif kind in ('annotated', 'qualifier', 'alias'):
+        elif kind in ('annotated', 'qualifier', 'alias', 'unpack_typeddict', 'initvar'):
             result = self.args[0].schema(seen)
         elif kind == 'typevar':
             result = {'anyOf':[a.schema(seen) for a in self.args]} if self.args else {}
@@ -115,6 +268,10 @@ class Contract:
         kind = self.kind
         if kind == 'any' or (kind == 'null' and value is None):
             return
+        if kind == 'callable':
+            if not callable(value):
+                raise TypeViolation(f'{path}: expected {self.name}, got {type(value).__name__}')
+            return
         if kind in PRIMITIVE_KINDS and type(value) is self.python_type:
             return
         bindings = {} if bindings is None else bindings
@@ -126,8 +283,10 @@ class Contract:
             raise TypeViolation(f'{path}: expected {self.name}, got {type(value).__name__}' + (f' ({detail})' if detail else ''))
         def child(contract, item, suffix):
             contract.validate(item, path + suffix, bindings=bindings, seen=seen)
-        if kind in ('alias', 'annotated', 'qualifier'):
+        if kind in ('alias', 'annotated', 'qualifier', 'unpack_typeddict', 'initvar'):
             child(self.args[0], value, '')
+        elif kind == 'kw_only':
+            raise UnsupportedType('KW_ONLY marks dataclass parameters; it is not a value type')
         elif kind == 'never': fail('this boundary must not return')
         elif kind == 'union':
             for contract in self.args:
@@ -139,15 +298,39 @@ class Contract:
             fail()
         elif kind == 'literal':
             if not any(type(value) is type(v) and value == v for v in self.args): fail('not an allowed literal')
+        elif kind == 'abc':
+            if not issubclass(type(value), self.python_type): fail()
+        elif kind == 'io':
+            target = self.args[0]
+            if not issubclass(type(value), io.IOBase): fail()
+            if issubclass(type(value), io.TextIOBase):
+                child(target, '', '.read()')
+            elif issubclass(type(value), (io.BufferedIOBase, io.RawIOBase)):
+                child(target, b'', '.read()')
+            elif target.kind != 'any':
+                fail('stream data type cannot be determined without reading it')
+        elif kind in ('pattern', 'match'):
+            expected = re.Pattern if kind == 'pattern' else re.Match
+            if type(value) is not expected: fail()
+            child(self.args[0], value.pattern if kind == 'pattern' else value.string,
+                  '.pattern' if kind == 'pattern' else '.string')
         elif kind == 'null':
             if value is not None: fail()
         elif kind in ('str','int','float','bool','bytes','complex'):
             if type(value) is not self.python_type: fail()
-        elif kind in ('list','set','frozenset','sequence','tuple_many','tuple'):
-            expected = {'list':list,'set':set,'frozenset':frozenset,'tuple':tuple,'tuple_many':tuple}.get(kind)
+        elif kind in ('list','set','frozenset','sequence','deque','tuple_many','tuple',
+                      'mutable_sequence','abstract_set','mutable_set','collection',
+                      'container','reversible'):
+            expected = CONCRETE_SEQUENCE_TYPES.get(kind)
             if expected is not None and type(value) is not expected: fail()
-            if kind == 'sequence' and type(value) not in (list,tuple,str,bytes,range):
+            if kind == 'sequence' and type(value) not in (list,tuple,str,bytes,bytearray,memoryview,range):
                 fail('only non-consuming concrete sequences can be checked')
+            if kind == 'mutable_sequence' and type(value) not in (list,bytearray): fail()
+            if kind == 'abstract_set' and type(value) not in (set,frozenset): fail()
+            if kind in ('collection','container') and type(value) not in SAFE_COLLECTION_TYPES:
+                fail('only non-consuming concrete collections can be checked')
+            if kind == 'reversible' and type(value) not in SAFE_REVERSIBLE_TYPES:
+                fail('only non-consuming concrete reversible collections can be checked')
             if kind == 'tuple' and len(value) != len(self.args): fail('wrong tuple length')
             if kind != 'tuple' and self.args[0].kind in PRIMITIVE_KINDS:
                 member = self.args[0]
@@ -158,11 +341,46 @@ class Contract:
                 return
             for index, item in enumerate(value):
                 child(self.args[index] if kind == 'tuple' else self.args[0], item, f'[{index}]')
-        elif kind in ('dict','mapping'):
-            if type(value) is not dict: fail('a concrete dict is required for deep checking')
+        elif kind == 'tuple_unpacked':
+            if type(value) is not tuple: fail()
+            pivot = next(index for index, item in enumerate(self.args) if item.kind == 'unpack_any')
+            suffix = len(self.args) - pivot - 1
+            if len(value) < pivot + suffix: fail('wrong tuple length')
+            for index, contract in enumerate(self.args[:pivot]):
+                child(contract, value[index], f'[{index}]')
+            for index, contract in enumerate(self.args[pivot + 1:]):
+                position = len(value) - suffix + index
+                child(contract, value[position], f'[{position}]')
+        elif kind in ('dict','mapping','mutable_mapping','defaultdict','ordered_dict','counter'):
+            if kind in ('mapping', 'mutable_mapping'):
+                if type(value) not in SAFE_MAPPING_TYPES:
+                    fail('only concrete mappings can be checked deeply')
+            else:
+                expected = CONCRETE_MAPPING_TYPES[kind]
+                if type(value) is not expected:
+                    fail(f'a concrete {expected.__name__} is required for deep checking')
             for index, (key,item) in enumerate(value.items()):
                 child(self.args[0],key,f'.keys[{index}]')
                 child(self.args[1],item,f'[{key!r}]' if type(key) in (str,int) else f'.values[{index}]')
+        elif kind == 'chainmap':
+            if type(value) is not ChainMap: fail()
+            if type(value.maps) not in (list, tuple): fail('ChainMap maps must be concrete')
+            for map_index, mapping in enumerate(value.maps):
+                if type(mapping) not in SAFE_MAPPING_TYPES:
+                    fail('only concrete ChainMap members can be checked deeply')
+                for index, (key, item) in enumerate(mapping.items()):
+                    child(self.args[0], key, f'.maps[{map_index}].keys[{index}]')
+                    child(self.args[1], item, f'.maps[{map_index}][{key!r}]'
+                          if type(key) in (str,int) else f'.maps[{map_index}].values[{index}]')
+        elif kind in SAFE_VIEW_TYPES:
+            if type(value) not in SAFE_VIEW_TYPES[kind]:
+                fail('only concrete mapping views can be checked deeply')
+            for index, item in enumerate(value):
+                if kind == 'items_view':
+                    child(self.args[0], item[0], f'[{index}][0]')
+                    child(self.args[1], item[1], f'[{index}][1]')
+                else:
+                    child(self.args[0], item, f'[{index}]')
         elif kind == 'typeddict':
             if type(value) is not dict: fail()
             missing = self.required - value.keys()
@@ -178,13 +396,25 @@ class Contract:
             for name, contract in self.fields.items():
                 try: item = object.__getattribute__(value,name)
                 except AttributeError:
-                    if dataclasses.is_dataclass(self.python_type): fail(f'missing attribute {name}')
+                    if name.startswith('_'):
+                        try: private = object.__getattribute__(value, '__pydantic_private__')
+                        except AttributeError: private = None
+                        if type(private) is dict and name in private:
+                            child(contract, private[name], '.' + name)
+                            continue
+                    if dataclasses.is_dataclass(self.python_type):
+                        params = getattr(self.python_type, '__dataclass_params__', None)
+                        field = getattr(self.python_type, '__dataclass_fields__', {}).get(name)
+                        if (params is None or params.init) and (field is None or
+                                (field.init and field.default is dataclasses.MISSING and
+                                 field.default_factory is dataclasses.MISSING)):
+                            fail(f'missing attribute {name}')
                     continue
                 child(contract,item,'.'+name)
         elif kind == 'type':
             if not isinstance(value,type): fail()
             target = self.args[0]
-            if target.kind != 'any' and (target.python_type is None or not issubclass(value,target.python_type)):
+            if not target.accepts_class(value, bindings):
                 fail()
         elif kind in ('generator','async_generator'):
             raise UnsupportedType('Lazy iterable contracts must be checked at yield/send boundaries, not by consuming the object')
@@ -204,6 +434,11 @@ class Compiler:
         self.cache = {}
 
     def lookup(self, node, names):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'type' and names.get('type') is type
+                and len(node.args) == 1 and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value is None and not node.keywords):
+            return type(None)
         if isinstance(node,ast.Name):
             if node.id not in names:
                 raise UnsupportedType(f'Unresolved output type: {node.id}')
@@ -229,24 +464,93 @@ class Compiler:
             if isinstance(node.value,str): return self.compile(node.value,names)
         if isinstance(node,ast.BinOp) and isinstance(node.op,ast.BitOr):
             return Contract('union',ast.unparse(node),(self.node(node.left,names),self.node(node.right,names)))
+        if isinstance(node, ast.Starred) and isinstance(node.value, ast.Name):
+            parameter = names.get(node.value.id)
+            if isinstance(parameter, typing.TypeVarTuple):
+                return Contract('unpack_any', ast.unparse(node), python_type=parameter)
+            if isinstance(parameter, tuple) and all(isinstance(item, Contract) for item in parameter):
+                return Contract('unpack_fixed', ast.unparse(node), parameter)
         if isinstance(node,ast.Subscript):
             base = self.lookup(node.value,names)
             nodes = node.slice.elts if isinstance(node.slice,ast.Tuple) else [node.slice]
+            if base in (typing.Callable, abc.Callable):
+                if len(nodes) != 2:
+                    raise UnsupportedType('Callable requires parameters and a return type')
+                return Contract('callable', ast.unparse(node), python_type=abc.Callable)
+            if (base is typing.Unpack and len(nodes) == 1 and isinstance(nodes[0], ast.Name)
+                    and isinstance(names.get(nodes[0].id), typing.TypeVarTuple)):
+                return Contract('unpack_any', ast.unparse(node), python_type=names[nodes[0].id])
+            if (base is typing.Unpack and len(nodes) == 1 and isinstance(nodes[0], ast.Name)
+                    and isinstance(names.get(nodes[0].id), tuple)
+                    and all(isinstance(item, Contract) for item in names[nodes[0].id])):
+                return Contract('unpack_fixed', ast.unparse(node), names[nodes[0].id])
             if base is typing.Literal:
                 values = tuple(self.lookup(n,names) if isinstance(n,ast.Attribute) else ast.literal_eval(n) for n in nodes)
                 if any(type(v) not in (str,int,bool,bytes,type(None)) and not isinstance(v,enum.Enum) for v in values):
                     raise UnsupportedType('Unsupported Literal value')
                 return Contract('literal',ast.unparse(node),values)
             if base is typing.Annotated:
-                metadata = [ast.literal_eval(n) for n in nodes[1:]]
+                # Metadata is arbitrary Python data, including calls and
+                # framework field objects. Only literal text is a prompt hint;
+                # checking the wrapped type must not evaluate metadata again.
+                descriptions = [n.value for n in nodes[1:]
+                                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
                 return Contract('annotated',ast.unparse(node),(self.node(nodes[0],names),),
-                                description='; '.join(v for v in metadata if isinstance(v,str)))
-            args = tuple(Ellipsis if isinstance(n,ast.Constant) and n.value is Ellipsis else self.node(n,names) for n in nodes)
+                                description='; '.join(descriptions))
+            if base in TYPE_NARROWING_TYPES:
+                if len(nodes) != 1:
+                    raise UnsupportedType('Type narrowing requires one target type')
+                return Contract('bool',ast.unparse(node),python_type=bool)
+            accepts_parameter_list = (typing.get_origin(base) or base) is abc.Callable or (
+                isinstance(typing.get_origin(base) or base, type) and
+                any(isinstance(parameter, typing.ParamSpec)
+                    for parameter in class_parameters(typing.get_origin(base) or base)))
+            args = tuple(
+                Ellipsis if isinstance(n,ast.Constant) and n.value is Ellipsis else
+                Contract('param_spec_args', ast.unparse(n),
+                         tuple(self.node(item,names) for item in n.elts))
+                if isinstance(n, ast.List) and accepts_parameter_list else self.node(n,names)
+                for n in nodes)
             return self.generic(base,args,ast.unparse(node),names)
         return self.value(self.lookup(node,names),names)
 
     def generic(self,base,args,label,names):
         origin = typing.get_origin(base) or base
+        if origin is dataclasses.InitVar:
+            if len(args) != 1:
+                raise UnsupportedType('InitVar requires one type')
+            return Contract('initvar', label, args)
+        if origin is typing.Unpack and len(args) == 1 and args[0].kind in ('unpack_any', 'unpack_fixed'):
+            return args[0]
+        if origin is typing.Unpack and len(args) == 1:
+            unpacked = args[0]
+            visited = set()
+            while unpacked.kind in ('alias', 'annotated') and id(unpacked) not in visited:
+                visited.add(id(unpacked))
+                unpacked = unpacked.args[0]
+            if unpacked.kind == 'typeddict':
+                return Contract('unpack_typeddict', label, (unpacked,))
+        if origin is abc.Callable:
+            return Contract('callable',label,python_type=abc.Callable)
+        if not args and origin in (abc.ByteString, abc.Iterable, abc.Iterator,
+                                   abc.Generator, abc.AsyncIterable, abc.AsyncIterator,
+                                   abc.AsyncGenerator, abc.Awaitable, abc.Coroutine,
+                                   contextlib.AbstractContextManager,
+                                   contextlib.AbstractAsyncContextManager):
+            return Contract('abc', label, python_type=origin)
+        if origin in (abc.Hashable, abc.Sized):
+            if args:
+                raise UnsupportedType(f'{label}: this ABC does not take type arguments')
+            return Contract('abc', label, python_type=origin)
+        if origin is typing.IO:
+            if len(args) != 1:
+                raise UnsupportedType('IO requires one stream type')
+            return Contract('io', label, args)
+        if origin in (re.Pattern, re.Match):
+            if len(args) > 1:
+                raise UnsupportedType('Regex type requires one input type')
+            return Contract('pattern' if origin is re.Pattern else 'match', label,
+                            args or (Contract('any', 'Any'),), python_type=origin)
         if origin in (typing.Union,types.UnionType):
             return Contract('union',label,args)
         if base is typing.Optional:
@@ -258,40 +562,102 @@ class Compiler:
             if len(args) != 1:
                 raise UnsupportedType('Qualifier requires one type')
             return Contract('qualifier',label,args,qualifier=base._name)
-        containers = {list:'list',set:'set',frozenset:'frozenset',dict:'dict',abc.Sequence:'sequence',abc.Mapping:'mapping'}
-        if origin in containers:
-            expected = 2 if origin in (dict,abc.Mapping) else 1
+        if origin in CONTAINER_KINDS:
+            expected = (2 if origin in (dict,abc.Mapping,abc.MutableMapping,defaultdict,
+                                        OrderedDict,ChainMap,abc.ItemsView) else 1)
+            if not args:
+                args = (Contract('any', 'Any'),) * expected
             if len(args) != expected:
                 raise UnsupportedType(f'{label}: wrong number of type parameters')
-            return Contract(containers[origin],label,args)
+            if origin is Counter:
+                args += (Contract('int','int',python_type=int),)
+            return Contract(CONTAINER_KINDS[origin],label,args,python_type=origin)
         if origin is tuple:
-            if len(args) == 2 and args[1] is Ellipsis: return Contract('tuple_many',label,args[:1])
-            return Contract('tuple',label,args)
+            if len(args) == 2 and args[1] is Ellipsis:
+                return Contract('tuple_many',label,args[:1],python_type=tuple)
+            expanded = []
+            for arg in args:
+                if isinstance(arg, Contract) and arg.kind == 'unpack_fixed':
+                    expanded.extend(arg.args)
+                else:
+                    expanded.append(arg)
+            args = tuple(expanded)
+            unpacked = [index for index, arg in enumerate(args)
+                        if isinstance(arg, Contract) and arg.kind == 'unpack_any']
+            if len(unpacked) == 1:
+                if len(args) == 1:
+                    return Contract('tuple_many',label,(Contract('any','Any'),),python_type=tuple)
+                return Contract('tuple_unpacked',label,args,python_type=tuple)
+            if unpacked:
+                raise UnsupportedType('Only one variadic tuple parameter can be checked')
+            return Contract('tuple',label,args,python_type=tuple)
         if origin in (abc.Generator,abc.Iterator,abc.Iterable,abc.AsyncGenerator,abc.AsyncIterator,abc.AsyncIterable):
             async_kind = origin in (abc.AsyncGenerator,abc.AsyncIterator,abc.AsyncIterable)
             expected = 3 if origin is abc.Generator else 2 if origin is abc.AsyncGenerator else 1
             if len(args) != expected:
                 raise UnsupportedType('Wrong iterator type argument count')
             padded = args + (Contract('null','None'),)*(3-len(args))
-            return Contract('async_generator' if async_kind else 'generator',label,padded)
+            return Contract('async_generator' if async_kind else 'generator',label,padded,
+                            python_type=origin)
         if origin is type:
+            if not args:
+                args = (Contract('any', 'Any'),)
             if len(args) != 1:
                 raise UnsupportedType('type requires one parameter')
-            return Contract('type',label,args)
+            return Contract('type',label,args,python_type=type)
         if isinstance(base,TYPE_ALIAS_TYPES): return self.alias(base,names,args,label)
-        if isinstance(base,type) and (getattr(base,'__type_params__',()) or getattr(base,'__parameters__',())):
-            parameters = getattr(base,'__type_params__',()) or base.__parameters__
-            if len(parameters) != len(args):
-                raise UnsupportedType('Generic type argument count mismatch')
-            return self.class_contract(base,names | {p.__name__: a for p,a in zip(parameters,args)},label)
+        if isinstance(base,type) and (parameters := class_parameters(base)):
+            scope = self.module_names(base,names)
+            bindings = self.parameter_bindings(parameters, args, scope,
+                                               'Generic type argument count mismatch')
+            return self.class_contract(base,scope | bindings,label)
         raise UnsupportedType(f'Unsupported generic output type: {label}; no unchecked fallback is allowed')
+
+    def parameter_bindings(self, parameters, args, names, error):
+        variadic = [index for index, parameter in enumerate(parameters)
+                    if isinstance(parameter, typing.TypeVarTuple)]
+        if len(variadic) > 1:
+            raise UnsupportedType('Only one TypeVarTuple can be specialized')
+        no_default = getattr(typing, 'NoDefault', None)
+        if variadic:
+            pivot = variadic[0]
+            suffix_parameters = parameters[pivot + 1:]
+            required_suffix = sum(getattr(parameter, '__default__', no_default) is no_default
+                                  for parameter in suffix_parameters)
+            if len(args) < pivot + required_suffix:
+                raise UnsupportedType(error)
+            bindings = {parameter.__name__: arg
+                        for parameter, arg in zip(parameters[:pivot], args[:pivot])}
+            supplied_suffix = min(len(suffix_parameters), len(args) - pivot)
+            middle_end = len(args) - supplied_suffix
+            bindings[parameters[pivot].__name__] = args[pivot:middle_end]
+            bindings.update({parameter.__name__: arg for parameter, arg in
+                             zip(suffix_parameters, args[middle_end:])})
+            for parameter in suffix_parameters[supplied_suffix:]:
+                default = getattr(parameter, '__default__', no_default)
+                if default is no_default:
+                    raise UnsupportedType(error)
+                bindings[parameter.__name__] = self.compile(default, names | bindings)
+            return bindings
+        if len(args) > len(parameters):
+            raise UnsupportedType(error)
+        bindings = {parameter.__name__: arg for parameter, arg in zip(parameters,args)}
+        for parameter in parameters[len(args):]:
+            default = getattr(parameter, '__default__', no_default)
+            if default is no_default:
+                raise UnsupportedType(error)
+            bindings[parameter.__name__] = self.compile(default, names | bindings)
+        return bindings
 
     def alias(self,alias,names,args=(),label=None):
         parameters = alias.__type_params__
-        if parameters and len(args) != len(parameters):
-            raise UnsupportedType('Generic alias requires its type arguments')
-        scope = self.module_names(alias,names) | {p.__name__:a for p,a in zip(parameters,args)}
-        key = (id(alias),tuple(id(a) for a in args))
+        scope = self.module_names(alias,names)
+        bindings = ({parameter.__name__: parameter for parameter in parameters}
+                    if not args and label is None else
+                    self.parameter_bindings(parameters, args, scope,
+                                            'Generic alias requires its type arguments'))
+        scope |= bindings
+        key = (id(alias), tuple(id(a) for a in args), label is None)
         if key in self.cache:
             return self.cache[key]
         result = Contract('alias',label or alias.__name__)
@@ -306,8 +672,8 @@ class Compiler:
     @staticmethod
     def module_names(target,names):
         module = sys.modules.get(getattr(target,'__module__',''))
-        # Defining module names win over unrelated caller aliases.
-        return names | (vars(module) if module else {})
+        # Defining module and annotation closure names win over caller aliases.
+        return names | (vars(module) if module else {}) | annotation_locals(target)
 
     def class_contract(self,target,names,label=None):
         key = (id(target),label or target.__qualname__)
@@ -319,16 +685,63 @@ class Compiler:
         result = Contract('typeddict' if record else 'class',label or target.__qualname__,python_type=target)
         self.cache[key] = result
         if target in VALIDATORS: return result
-        scope = self.module_names(target,names) | {target.__name__:target}
-        scope.update({p.__name__:p for p in (getattr(target,'__type_params__',()) or getattr(target,'__parameters__',()))})
-        scope.update({k:v for k,v in names.items() if isinstance(v,Contract)})
+        scope = (self.module_names(target,names) |
+                 dict(type.__getattribute__(target, '__dict__')) |
+                 {target.__name__:target, SELF_OWNER:target})
+        scope.update({p.__name__:p for p in class_parameters(target)})
+        # isinstance can call a user's __getattribute__('__class__') here.
+        scope.update({k:v for k,v in names.items()
+                      if (issubclass(type(v), Contract) or
+                          (type(v) is tuple and all(issubclass(type(item), Contract) for item in v)))})
+        # Each class owns its annotation namespace. A subclass can bind an
+        # inherited parameter through Base[int] or through several generic
+        # intermediate classes, even when it has no parameters of its own.
+        scopes = {target: scope}
+        pending = [target]
+        while pending:
+            current = pending.pop(0)
+            current_scope = scopes[current]
+            for original in vars(current).get('__orig_bases__', current.__bases__):
+                base = typing.get_origin(original) or original
+                if not isinstance(base, type) or base in scopes or base not in current.__bases__:
+                    continue
+                base_scope = (self.module_names(base, current_scope) |
+                              dict(type.__getattribute__(base, '__dict__')) |
+                              {base.__name__: base})
+                parameters = class_parameters(base)
+                arguments = typing.get_args(original)
+                if parameters and arguments:
+                    compiled = []
+                    argument_scope = dict(current_scope)
+                    variadic = any(isinstance(parameter, typing.TypeVarTuple)
+                                   for parameter in parameters)
+                    for arg in arguments:
+                        contract = self.compile(arg, argument_scope)
+                        members = contract.args if contract.kind == 'unpack_fixed' else (contract,)
+                        for member in members:
+                            position = len(compiled)
+                            compiled.append(member)
+                            if not variadic and position < len(parameters):
+                                argument_scope[parameters[position]] = member
+                    base_scope.update(self.parameter_bindings(parameters, tuple(compiled), current_scope,
+                                                              'Generic type argument count mismatch'))
+                else:
+                    base_scope.update({parameter.__name__: parameter for parameter in parameters})
+                scopes[base] = base_scope
+                pending.append(base)
         fields = {}
         for base in reversed(target.__mro__):
             if base in (object,dict): continue
-            fields.update(annotations_of(base))
-        for name, source in fields.items():
-            contract = self.compile(source,scope)
-            if contract.marker == 'ClassVar':
+            fields.update({name: (source, base) for name, source in annotations_of(base).items()})
+        dataclass_fields = getattr(target, '__dataclass_fields__', None) if dataclasses.is_dataclass(target) else None
+        for name, (source, owner) in fields.items():
+            if dataclass_fields is not None and name not in dataclass_fields:
+                continue
+            if descriptor_field(target, name, source, scopes.get(owner, scope)):
+                continue
+            contract = self.compile(source, scopes.get(owner, scope))
+            if (contract.marker == 'ClassVar' or contract.kind in ('initvar', 'kw_only')
+                    or (issubclass(target, enum.Enum) and name in target.__members__)):
                 continue
             result.fields[name] = contract
         if record:
@@ -346,11 +759,36 @@ class Compiler:
         if isinstance(target,Contract): return target
         if target is None or target is type(None): return Contract('null','None')
         if target is typing.Any: return Contract('any','Any')
+        if target is typing.Tuple:
+            return Contract('tuple_many', 'typing.Tuple', (Contract('any', 'Any'),),
+                            python_type=tuple)
+        if target is typing.IO or target is typing.TextIO or target is typing.BinaryIO:
+            stream_type = ('str' if target is typing.TextIO else
+                           'bytes' if target is typing.BinaryIO else 'any')
+            return Contract('io', target.__name__,
+                            (Contract(stream_type, stream_type,
+                                      python_type={'str':str, 'bytes':bytes}.get(stream_type)),))
+        if target is typing.TypeAlias or target is TypeAlias:
+            return Contract('any', 'TypeAlias')
+        if target is dataclasses.KW_ONLY:
+            return Contract('kw_only', 'KW_ONLY')
+        if target is dataclasses.InitVar:
+            return Contract('initvar', 'InitVar', (Contract('any', 'Any'),))
+        if isinstance(target, dataclasses.InitVar):
+            return Contract('initvar', str(target),
+                            (self.compile(target.type, names),))
+        if isinstance(target, typing.TypeVarTuple):
+            bound = names.get(target, names.get(target.__name__))
+            return (Contract('unpack_fixed', target.__name__, bound)
+                    if isinstance(bound, tuple) and all(isinstance(item, Contract) for item in bound)
+                    else Contract('unpack_any', target.__name__, python_type=target))
+        if target in (typing.Callable, abc.Callable):
+            return Contract('callable',str(target),python_type=abc.Callable)
         if target in (typing.Final,typing.ClassVar):
             return Contract('qualifier',str(target),(Contract('any','Any'),),qualifier=target._name)
         if target in (typing.Never,typing.NoReturn): return Contract('never',str(target))
         if target is typing.Self:
-            owner = names.get('self',names.get('cls'))
+            owner = names.get(SELF_OWNER, names.get('self',names.get('cls')))
             if owner is None:
                 raise UnsupportedType('Self requires an instance or class scope')
             return self.value(owner if isinstance(owner,type) else type(owner),names)
@@ -358,7 +796,7 @@ class Compiler:
             raise UnsupportedType('LiteralString requires static provenance checking; use str for a runtime string contract')
         if isinstance(target,TYPE_ALIAS_TYPES): return self.alias(target,names)
         if isinstance(target,typing.TypeVar):
-            substituted = names.get(target.__name__)
+            substituted = names.get(target, names.get(target.__name__))
             if isinstance(substituted,Contract):
                 return substituted
             choices = target.__constraints__ or ((target.__bound__,) if target.__bound__ else ())
@@ -370,12 +808,24 @@ class Compiler:
         if origin is typing.Literal: return Contract('literal',str(target),args)
         if origin is typing.Annotated:
             return Contract('annotated',str(target),(self.compile(args[0],names),),description='; '.join(v for v in args[1:] if isinstance(v,str)))
+        if origin in TYPE_NARROWING_TYPES:
+            return Contract('bool',str(target),python_type=bool)
         if origin is not None:
-            return self.generic(origin,tuple(Ellipsis if a is Ellipsis else self.compile(a,names) for a in args),str(target),names)
+            accepts_parameter_list = origin is abc.Callable or (
+                isinstance(origin, type) and
+                any(isinstance(parameter, typing.ParamSpec)
+                    for parameter in class_parameters(origin)))
+            compiled = tuple(
+                Ellipsis if arg is Ellipsis else
+                Contract('param_spec_args', str(arg),
+                         tuple(self.compile(item,names) for item in arg))
+                if isinstance(arg, (list, tuple)) and accepts_parameter_list else self.compile(arg,names)
+                for arg in args)
+            return self.generic(origin,compiled,str(target),names)
         if target in (int,str,float,bool,bytes,complex): return Contract(target.__name__,target.__name__,python_type=target)
         if target in (list,set,frozenset,dict,tuple):
             any_type = Contract('any','Any')
-            if target is tuple: return Contract('tuple_many','tuple',(any_type,))
+            if target is tuple: return Contract('tuple_many','tuple',(any_type,),python_type=tuple)
             return self.generic(target,(any_type,any_type) if target is dict else (any_type,),target.__name__,names)
         if not isinstance(target,type):
             raise UnsupportedType('Annotation is not a supported Python type')
@@ -386,7 +836,7 @@ class Compiler:
 def annotation_node(annotation):
     # Compiler.node only reads this tree. Namespace resolution still happens on
     # every compile, including forward references and mutable class annotations.
-    return ast.parse(annotation, mode='eval').body
+    return ast.parse(annotation.strip(), mode='eval').body
 
 
 class ContractCache:

@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import builtins
 import importlib.abc
 import importlib.machinery
 import importlib.metadata
+import importlib.util
 import json
 import os
 import sys
 import tokenize
+import traceback
 import types
+import warnings
+import zipfile
 from pathlib import Path
 from time import perf_counter
 
 from .config import describe, resolve
-from .frontend import RUNTIME_NAME, parse
+from .frontend import parse
 from .models import AiythonError, ConfigError
 from .runtime import Runtime
 
@@ -32,8 +38,26 @@ class ProjectLoader(importlib.machinery.SourceFileLoader):
         self.runtime = runtime
 
     def exec_module(self, module):
-        module.__dict__[RUNTIME_NAME] = self.runtime
-        exec(self.runtime.compile_source(read_source(self.path), self.path), module.__dict__)
+        source = read_source(self.path)
+        code = self.runtime.compile_source(source, self.path)
+        if not sys.dont_write_bytecode and not self.runtime.units[self.path].blocks:
+            self.get_code(module.__name__)
+        exec(code, module.__dict__)
+
+
+class StaticProjectLoader(ProjectLoader):
+    """Expose a package path during --explain without running its AI source."""
+
+    def __init__(self, name, path, runtime, loaded):
+        super().__init__(name, path, runtime)
+        self.loaded = loaded
+
+    def exec_module(self, module):
+        parent_name, _, child_name = module.__name__.rpartition(".")
+        parent = sys.modules.get(parent_name) if parent_name else None
+        old_value = vars(parent).get(child_name) if parent is not None else None
+        had_value = parent is not None and child_name in vars(parent)
+        self.loaded.append((module, parent, child_name, had_value, old_value))
 
 
 class ProjectFinder(importlib.abc.MetaPathFinder):
@@ -56,58 +80,386 @@ class ProjectFinder(importlib.abc.MetaPathFinder):
         return spec
 
 
-def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, stats=False, trace_plan=False,
-               config_path=None, profile=None, force_profile=None):
-    started = perf_counter()
-    path = path.resolve()
-    config = config or resolve(path, config_path=config_path, profile=profile, force_profile=force_profile)
-    config_seconds = perf_counter() - started
-    runtime = Runtime(config, agent_factory=agent_factory, stats=stats, trace_plan=trace_plan)
-    code = runtime.compile_source(read_source(path), str(path), entry=True)
-    module = types.ModuleType("__main__")
-    module.__dict__.update({"__file__": str(path), "__package__": None,
-                            "__spec__": None,
-                            "__cached__": None, RUNTIME_NAME: runtime,
-                            "__builtins__": __builtins__})
-    old_main = sys.modules.get("__main__")
-    old_argv, old_path = sys.argv, sys.path[:]
-    old_spawn_entry = os.environ.get("AIYTHON_SPAWN_ENTRY")
-    finder = ProjectFinder(runtime)
-    execution_started = None
+class ModuleStartFinder(ProjectFinder):
+    """Transform project imports with AI syntax while -m resolves its target."""
+
+    def __init__(self, runtime, *, explain=False):
+        super().__init__(runtime)
+        self.explain = explain
+        self.static_modules = []
+
+    def find_spec(self, fullname, path=None, target=None):
+        spec = super().find_spec(fullname, path, target)
+        if spec is None:
+            return None
+        source = spec.loader.get_source(fullname)
+        if source is None:
+            return None
+        try:
+            compile(source, spec.origin, "exec", dont_inherit=True)
+        except SyntaxError:
+            if self.explain:
+                spec.loader = StaticProjectLoader(fullname, spec.origin, self.runtime,
+                                                  self.static_modules)
+            return spec
+        return None
+
+
+def interpreter_arguments():
+    original = sys.orig_argv
+    for index in range(len(original) - 1):
+        if original[index] == "-m" and original[index + 1] in ("aiython", "aiython.__main__"):
+            return original[:index]
+    return [sys.executable]
+
+
+def module_details(name):
+    if name.startswith("."):
+        raise AiythonError("Relative module names not supported")
     try:
-        sys.modules["__main__"] = module
-        sys.argv = [str(path), *arguments]
-        sys.path.insert(0, str(path.parent))
-        sys.meta_path.insert(0, finder)
-        os.environ["AIYTHON_SPAWN_ENTRY"] = str(path)
-        execution_started = perf_counter()
-        exec(code, module.__dict__)
-        return module.__dict__
+        spec = importlib.util.find_spec(name)
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        raise AiythonError(f"Error while finding module specification for {name!r} "
+                           f"({type(exc).__name__}: {exc})") from None
+    parent = name.rpartition(".")[0]
+    existing = sys.modules.get(name)
+    if parent and existing is not None and not hasattr(existing, "__path__"):
+        warnings.warn(f"{name!r} found in sys.modules after import of package {parent!r}, "
+                      f"but prior to execution of {name!r}; this may result in unpredictable behaviour",
+                      RuntimeWarning, stacklevel=2)
+    if spec is None:
+        raise AiythonError(f"No module named {name}")
+    if spec.submodule_search_locations is not None:
+        if name == "__main__" or name.endswith(".__main__"):
+            raise AiythonError("Cannot use package as __main__ module")
+        try:
+            return module_details(name + ".__main__")
+        except AiythonError as exc:
+            raise AiythonError(f"{exc}; {name!r} is a package and cannot be directly executed") from None
+    loader = spec.loader
+    if loader is None:
+        raise AiythonError(f"{name!r} is a namespace package and cannot be executed")
+    source = getattr(loader, "get_source", lambda _: None)(name)
+    code = loader.get_code(name) if source is None else None
+    if code is None and source is None:
+        raise AiythonError(f"No code object available for {name}")
+    return spec, source, code
+
+
+def module_source(name, arguments=(), *, runtime=None, explain=False, interactive=False):
+    old_main = sys.modules.get("__main__")
+    old_argv, old_orig_argv = sys.argv, sys.orig_argv
+    interpreter_args = [*interpreter_arguments(), *(['-i'] if interactive else [])]
+    initial_main = types.ModuleType("__main__")
+    initial_main.__loader__ = importlib.machinery.BuiltinImporter
+    initial_main.__builtins__ = builtins
+    if sys.version_info < (3, 14):
+        initial_main.__annotations__ = {}
+    finder = ModuleStartFinder(runtime, explain=explain) if runtime is not None else None
+    try:
+        sys.modules["__main__"] = initial_main
+        sys.argv = ["-m", *arguments]
+        sys.orig_argv = [*interpreter_args, "-m", name, *arguments]
+        if not sys.flags.safe_path:
+            sys.path[:1] = [str(Path.cwd())]
+        if finder is not None:
+            sys.meta_path.insert(0, finder)
+        spec, source, code = module_details(name)
     finally:
-        execution_seconds = perf_counter() - execution_started if execution_started is not None else 0
+        if finder is not None:
+            sys.meta_path.remove(finder)
+            for module, parent, child_name, had_value, old_value in reversed(finder.static_modules):
+                if sys.modules.get(module.__name__) is module:
+                    sys.modules.pop(module.__name__)
+                if parent is not None and vars(parent).get(child_name) is module:
+                    if had_value:
+                        setattr(parent, child_name, old_value)
+                    else:
+                        delattr(parent, child_name)
         sys.argv = old_argv
-        sys.path[:] = old_path
-        sys.meta_path.remove(finder)
-        if old_spawn_entry is None:
-            os.environ.pop("AIYTHON_SPAWN_ENTRY", None)
-        else:
-            os.environ["AIYTHON_SPAWN_ENTRY"] = old_spawn_entry
+        sys.orig_argv = old_orig_argv
         if old_main is not None:
             sys.modules["__main__"] = old_main
         else:
             sys.modules.pop("__main__", None)
+    if isinstance(spec.loader, ProjectLoader):
+        spec.loader = importlib.machinery.SourceFileLoader(spec.name, spec.origin)
+    return spec, source, code, initial_main
+
+
+def path_source(path):
+    spec = importlib.machinery.PathFinder.find_spec("__main__", [str(path.absolute())])
+    if spec is None or spec.loader is None:
+        raise AiythonError(f"Cannot find __main__ in: {path}")
+    source = getattr(spec.loader, "get_source", lambda _: None)("__main__")
+    return spec, source, spec.loader.get_code("__main__")
+
+
+def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, stats=False, trace_plan=False,
+               config_path=None, profile=None, force_profile=None, restore_state=True,
+               source=None, module_spec=None, module_invocation=None, compiled_code=None, initial_main=None,
+               entry_kind="file", entry_argument=None, runtime=None, preparation_started=None,
+               resolved_seconds=None, interactive=False):
+    started = preparation_started if preparation_started is not None else perf_counter()
+    if entry_kind == "command":
+        argv0 = "-c"
+    elif entry_kind == "stdin":
+        argv0 = "-" if entry_argument is None else entry_argument
+    elif entry_kind == "module":
+        argv0 = module_spec.origin
+    elif entry_kind == "path":
+        argv0 = entry_argument
+    else:
+        argv0 = str(path)
+    display_path = ("<string>" if entry_kind == "command" else "<stdin>" if entry_kind == "stdin" else
+                    path if module_spec else path.absolute())
+    path = path.resolve()
+    config_source = (Path.cwd() / "__main__.py" if entry_kind in ("module", "command", "stdin") else
+                     Path(entry_argument).absolute() / "__main__.py" if entry_kind == "path" and
+                     Path(entry_argument).is_dir() else path)
+    config = config or resolve(config_source, config_path=config_path, profile=profile, force_profile=force_profile)
+    config_seconds = resolved_seconds if resolved_seconds is not None else perf_counter() - started
+    runtime = runtime or Runtime(config, agent_factory=agent_factory, stats=stats, trace_plan=trace_plan)
+    if compiled_code is None:
+        source = read_source(path) if source is None else source
+        code = runtime.compile_source(source, str(display_path), entry=True)
+        if (entry_kind == "module" and module_spec is not None and not sys.dont_write_bytecode
+                and not runtime.units[str(display_path)].blocks):
+            module_spec.loader.get_code(module_spec.name)
+    else:
+        code = compiled_code
+    module = initial_main or types.ModuleType("__main__")
+    module.__dict__.update({"__package__": module_spec.parent if module_spec else None,
+                            "__spec__": module_spec,
+                            "__loader__": module_spec.loader if module_spec else
+                                          importlib.machinery.BuiltinImporter if entry_kind in ("command", "stdin") else
+                                          importlib.machinery.SourcelessFileLoader("__main__", str(display_path))
+                                          if entry_kind == "bytecode" else
+                                          importlib.machinery.SourceFileLoader("__main__", str(display_path)),
+                            "__builtins__": builtins})
+    if entry_kind != "command":
+        module.__dict__.update({"__file__": module_spec.origin if module_spec else str(display_path),
+                                "__cached__": module_spec.cached if module_spec else None})
+    if sys.version_info < (3, 14):
+        module.__dict__.setdefault("__annotations__", {})
+    if interactive:
+        from .typed_runtime import Scope
+        runtime.types.interactive_globals = module.__dict__
+        runtime.types.interactive_scope = Scope()
+    old_main = sys.modules.get("__main__")
+    old_argv, old_orig_argv, old_path = sys.argv, sys.orig_argv, sys.path[:]
+    missing_last = object()
+    old_last = ({name: vars(sys).get(name, missing_last)
+                 for name in ('last_type', 'last_value', 'last_exc', 'last_traceback')}
+                if interactive and restore_state else {})
+    old_underscore = vars(builtins).get('_', missing_last) if interactive and restore_state else missing_last
+    interpreter_args = [*interpreter_arguments(), *(['-i'] if interactive else [])]
+    old_spawn_entry = os.environ.get("AIYTHON_SPAWN_ENTRY")
+    finder = ProjectFinder(runtime)
+    execution_started = None
+    def finish():
+        execution_seconds = perf_counter() - execution_started if execution_started is not None else 0
         runtime.capabilities.close()
         if stats:
             runtime.stats.run = {'total_seconds': perf_counter() - started,
                                  'config_seconds': config_seconds,
                                  'execution_seconds': execution_seconds}
         runtime.stats.report()
+    if not restore_state:
+        # Register before user code so its atexit callbacks run while the
+        # script's argv, import path, and runtime are still available.
+        atexit.register(finish)
+    try:
+        sys.modules["__main__"] = module
+        sys.argv = [argv0, *arguments]
+        sys.orig_argv = ([*interpreter_args, "-m", module_invocation, *arguments] if entry_kind == "module" else
+                         [*interpreter_args, "-c", source, *arguments] if entry_kind == "command" else
+                         [*interpreter_args] if entry_kind == "stdin" and entry_argument == "" else
+                         [*interpreter_args, argv0, *arguments])
+        if entry_kind == "path":
+            entry_path = str(Path(entry_argument).absolute())
+            if sys.flags.safe_path:
+                sys.path.insert(0, entry_path)
+            else:
+                sys.path[:1] = [entry_path]
+        elif not sys.flags.safe_path:
+            if entry_kind in ("file", "bytecode"):
+                sys.path[:1] = [str(path.parent)]
+            elif entry_kind in ("command", "stdin"):
+                sys.path[:1] = [""]
+        sys.meta_path.insert(0, finder)
+        if entry_kind in ("file", "module"):
+            os.environ["AIYTHON_SPAWN_ENTRY"] = str(display_path)
+        execution_started = perf_counter()
+        if interactive:
+            try:
+                exec(code, module.__dict__)
+            except BaseException as exc:
+                trace = exc.__traceback__
+                while trace is not None and trace.tb_frame.f_code.co_filename != str(display_path):
+                    trace = trace.tb_next
+                trace = trace or exc.__traceback__
+                sys.last_type = type(exc)
+                sys.last_value = exc.with_traceback(trace)
+                if sys.version_info >= (3, 12):
+                    sys.last_exc = sys.last_value
+                sys.last_traceback = trace
+                runtime.types.interactive_scope.failed = False
+                sys.excepthook(type(exc), exc, trace)
+            if entry_kind in ('file', 'bytecode', 'stdin'):
+                module.__dict__.pop('__file__', None)
+                module.__dict__.pop('__cached__', None)
+            from .repl import AiythonConsole
+            banner = ('' if sys.flags.quiet else
+                      f'Python {sys.version} on {sys.platform}\n'
+                      'Type "help", "copyright", "credits" or "license" for more information.')
+            AiythonConsole(runtime, module.__dict__).interact(banner=banner, exitmsg='')
+        else:
+            try:
+                exec(code, module.__dict__)
+            except Exception as exc:
+                if not restore_state and not config.profiles and not isinstance(exc, AiythonError):
+                    trace = exc.__traceback__
+                    while trace is not None and trace.tb_frame.f_code.co_filename != code.co_filename:
+                        trace = trace.tb_next
+                    if trace is not None:
+                        exc.__traceback__ = trace
+                        sys.excepthook(type(exc), exc, trace)
+                        raise SystemExit(1) from None
+                raise
+        return module.__dict__
+    finally:
+        if restore_state:
+            if interactive:
+                if old_underscore is missing_last:
+                    vars(builtins).pop('_', None)
+                else:
+                    builtins._ = old_underscore
+            for name, value in old_last.items():
+                if value is missing_last:
+                    vars(sys).pop(name, None)
+                else:
+                    setattr(sys, name, value)
+            sys.argv = old_argv
+            sys.orig_argv = old_orig_argv
+            sys.path[:] = old_path
+            sys.meta_path.remove(finder)
+            if old_spawn_entry is None:
+                os.environ.pop("AIYTHON_SPAWN_ENTRY", None)
+            else:
+                os.environ["AIYTHON_SPAWN_ENTRY"] = old_spawn_entry
+            if old_main is not None:
+                sys.modules["__main__"] = old_main
+            else:
+                sys.modules.pop("__main__", None)
+            finish()
+        else:
+            # CPython removes these entry-script attributes before waiting for
+            # non-daemon threads and running atexit callbacks.
+            if entry_kind in ("file", "bytecode", "stdin"):
+                module.__dict__.pop("__file__", None)
+                module.__dict__.pop("__cached__", None)
+
+
+def run_repl(*, config_path=None, profile=None, force_profile=None,
+             stats=False, trace_plan=False, restore_state=False):
+    from .repl import AiythonConsole
+    from .typed_runtime import Scope
+
+    started = perf_counter()
+    config = resolve(Path.cwd() / '__main__.py', config_path=config_path,
+                     profile=profile, force_profile=force_profile)
+    config_seconds = perf_counter() - started
+    runtime = Runtime(config, stats=stats, trace_plan=trace_plan)
+    module = types.ModuleType('__main__')
+    module.__dict__.update({'__package__': None, '__spec__': None,
+                            '__loader__': importlib.machinery.BuiltinImporter,
+                            '__builtins__': builtins})
+    runtime.types.interactive_globals = module.__dict__
+    runtime.types.interactive_scope = Scope()
+    console = AiythonConsole(runtime, module.__dict__)
+    finder = ProjectFinder(runtime)
+    old_main = sys.modules.get('__main__')
+    old_argv, old_orig_argv, old_path = sys.argv, sys.orig_argv, sys.path[:]
+    missing_last = object()
+    old_last = ({name: vars(sys).get(name, missing_last)
+                 for name in ('last_type', 'last_value', 'last_exc', 'last_traceback')}
+                if restore_state else {})
+    old_underscore = vars(builtins).get('_', missing_last) if restore_state else missing_last
+    execution_started = None
+    def finish():
+        if stats:
+            runtime.stats.run = {'total_seconds': perf_counter() - started,
+                                 'config_seconds': config_seconds,
+                                 'execution_seconds': (perf_counter() - execution_started
+                                                       if execution_started is not None else 0)}
+        runtime.stats.report()
+        runtime.capabilities.close()
+
+    if not restore_state:
+        atexit.register(finish)
+    try:
+        sys.modules['__main__'] = module
+        sys.argv = ['']
+        sys.orig_argv = interpreter_arguments()
+        if not sys.flags.safe_path:
+            sys.path[:1] = ['']
+        sys.meta_path.insert(0, finder)
+        banner = ('' if sys.flags.quiet else
+                  f'Python {sys.version} on {sys.platform}\n'
+                  'Type "help", "copyright", "credits" or "license" for more information.')
+        execution_started = perf_counter()
+        startup = os.environ.get('PYTHONSTARTUP') if not sys.flags.ignore_environment else None
+        if startup:
+            try:
+                with tokenize.open(startup) as source_file:
+                    source = source_file.read()
+            except OSError as exc:
+                print('Could not open PYTHONSTARTUP', file=sys.stderr)
+                print(f'{type(exc).__name__}: {exc}', file=sys.stderr)
+            except (SyntaxError, UnicodeError) as exc:
+                traceback.print_exception(type(exc), exc, None)
+            else:
+                module.__file__ = startup
+                try:
+                    try:
+                        code = runtime.compile_source(source, startup, entry=True)
+                    except (SyntaxError, OverflowError, ValueError) as exc:
+                        traceback.print_exception(type(exc), exc, None)
+                    else:
+                        console.runcode(code)
+                except SystemExit:
+                    raise
+                except BaseException:
+                    traceback.print_exc()
+                finally:
+                    module.__dict__.pop('__file__', None)
+        console.interact(banner=banner, exitmsg='')
+        return module.__dict__
+    finally:
+        if restore_state:
+            if old_underscore is missing_last:
+                vars(builtins).pop('_', None)
+            else:
+                builtins._ = old_underscore
+            for name, value in old_last.items():
+                if value is missing_last:
+                    vars(sys).pop(name, None)
+                else:
+                    setattr(sys, name, value)
+            sys.meta_path.remove(finder)
+            sys.argv, sys.orig_argv, sys.path[:] = old_argv, old_orig_argv, old_path
+            if old_main is None:
+                sys.modules.pop('__main__', None)
+            else:
+                sys.modules['__main__'] = old_main
+            finish()
 
 
 def parser():
     result = argparse.ArgumentParser(
         prog="aiython", description="Python with project-scoped AI execution",
-        epilog="Get started: aiython setup; aiython --explain script.py; aiython script.py. "
+        epilog="Get started: aiython setup; aiython --explain script.py; aiython script.py; aiython -m package.module. "
                "Other commands: aiython config show; aiython jobs list.")
     result.add_argument("--version", action="version",
                         version=f"%(prog)s {importlib.metadata.version('aiython')}")
@@ -118,17 +470,26 @@ def parser():
     result.add_argument("--explain", action="store_true", help="Show blocks/checkpoints without executing code")
     result.add_argument("--trace-plan", action="store_true", help="Trace actual capability routes, cache and timings")
     result.add_argument("--stats", action="store_true", help="Report model calls, tools, request bytes and timings on stderr")
-    result.add_argument("script")
+    result.add_argument("-i", "--interactive", action="store_true", help="Enter an interactive console after the program")
+    result.add_argument("-m", "--module", dest="module_args", nargs=argparse.REMAINDER,
+                        help="Run a Python module as __main__")
+    result.add_argument("-c", dest="command_args", nargs=argparse.REMAINDER,
+                        help="Run Python source from a command string")
+    result.add_argument("script", nargs="?")
     result.add_argument("args", nargs=argparse.REMAINDER)
     return result
 
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    original_path = sys.path[:] if argv is not None else None
     try:
+        implicit_stdin = not arguments and not sys.stdin.isatty()
         if not arguments:
-            parser().print_help()
-            return
+            if not implicit_stdin:
+                run_repl(restore_state=argv is not None)
+                return
+            arguments = ["-"]
         if arguments[:1] == ["setup"]:
             from .setup import setup
             setup(arguments[1:])
@@ -162,14 +523,95 @@ def main(argv=None):
             args = command.parse_args(arguments[2:])
             print(json.dumps(describe(resolve(Path(args.script), config_path=args.config)), indent=2, ensure_ascii=False))
             return
-        args = parser().parse_args(arguments)
-        path = Path(args.script)
+        argument_parser = parser()
+        args = argument_parser.parse_args(arguments)
+        module_spec = source = module_invocation = compiled_code = initial_main = entry_argument = None
+        module_config = module_runtime = module_started = module_config_seconds = None
+        entry_kind = "file"
+        if args.module_args is not None:
+            if not args.module_args:
+                argument_parser.error("-m requires a module name")
+            module_invocation, *script_args = args.module_args
+            try:
+                module_spec, source, original_code, initial_main = module_source(
+                    module_invocation, script_args, interactive=args.interactive)
+            except SyntaxError as exc:
+                # A source file with AI syntax cannot be imported as an ordinary
+                # parent package. A SyntaxError raised *by* package code is a
+                # program error and must not cause that package to run twice.
+                if exc.filename is None:
+                    raise
+                traceback = exc.__traceback__
+                while traceback is not None:
+                    if traceback.tb_frame.f_code.co_filename == exc.filename:
+                        raise
+                    traceback = traceback.tb_next
+                module_started = perf_counter()
+                module_config = resolve(Path.cwd() / "__main__.py", config_path=args.config,
+                                        profile=args.profile, force_profile=args.force_profile)
+                module_config_seconds = perf_counter() - module_started
+                module_runtime = Runtime(module_config, stats=args.stats, trace_plan=args.trace_plan)
+                try:
+                    module_spec, source, original_code, initial_main = module_source(
+                        module_invocation, script_args, runtime=module_runtime,
+                        explain=args.explain, interactive=args.interactive)
+                except BaseException:
+                    module_runtime.capabilities.close()
+                    raise
+                if args.explain:
+                    module_runtime.capabilities.close()
+                    module_runtime = None
+            path = Path(module_spec.origin or (original_code.co_filename if original_code else module_invocation))
+            entry_kind = "module"
+            if source is None:
+                compiled_code = original_code
+        elif args.command_args is not None:
+            if not args.command_args:
+                argument_parser.error("-c requires a command string")
+            source, *script_args = args.command_args
+            path = Path.cwd() / "__main__.py"
+            entry_kind = "command"
+        else:
+            if args.script is None:
+                if sys.stdin.isatty():
+                    if args.explain:
+                        argument_parser.error("--explain requires a script, -c, -m, or piped source")
+                    run_repl(config_path=args.config, profile=args.profile,
+                             force_profile=args.force_profile, stats=args.stats,
+                             trace_plan=args.trace_plan, restore_state=argv is not None)
+                    return
+                args.script = "-"
+                implicit_stdin = True
+            path = Path(args.script)
+            script_args = args.args
+            if args.script == "-":
+                source = sys.stdin.read()
+                path = Path.cwd() / "__main__.py"
+                entry_kind = "stdin"
+                if implicit_stdin:
+                    entry_argument = ""
+            elif path.suffix == ".pyc" and path.is_file():
+                compiled_code = importlib.machinery.SourcelessFileLoader(
+                    "__main__", str(path.absolute())).get_code("__main__")
+                entry_kind = "bytecode"
+            elif path.is_dir() or zipfile.is_zipfile(path):
+                entry_argument = args.script
+                module_spec, source, original_code = path_source(path)
+                path = Path(module_spec.origin or original_code.co_filename)
+                entry_kind = "path"
+                if source is None:
+                    compiled_code = original_code
         if args.explain:
-            config = resolve(path, config_path=args.config, profile=args.profile, force_profile=args.force_profile)
-            path = path.resolve()
-            unit = parse(read_source(path), str(path))
+            if source is None and compiled_code is not None:
+                raise AiythonError("Cannot explain an entry without Python source")
+            config_source = Path.cwd() / "__main__.py" if entry_kind in ("module", "command", "stdin") else path
+            config = resolve(config_source, config_path=args.config, profile=args.profile,
+                             force_profile=args.force_profile)
+            filename = ("<string>" if entry_kind == "command" else "<stdin>" if entry_kind == "stdin" else
+                        str(path if module_spec else path.resolve()))
+            unit = parse(read_source(path.resolve()) if source is None else source, filename)
             runtime = Runtime(config)
-            runtime.prepare(unit, entry=True)
+            runtime.bridge.prepare_unit(unit, entry=True, recovery_metadata=True)
             print(json.dumps({"config": describe(config), "blocks": [
                 {"statement": b.statement, "span": vars(b.span), "expression": b.expression, "output_type": b.output_type,
                  "plan": "requires runtime intent resolution", "cache": "unknown", "cost": "unknown",
@@ -177,8 +619,14 @@ def main(argv=None):
                 "checkpoints": [{"span": vars(c.span), "statement": c.statement}
                                 for c in runtime.checkpoints.values()]}, ensure_ascii=False, indent=2))
             return
-        run_script(path, args.args, config_path=args.config, profile=args.profile,
-                   force_profile=args.force_profile, stats=args.stats, trace_plan=args.trace_plan)
+        run_script(path, script_args, config=module_config, config_path=args.config, profile=args.profile,
+                   force_profile=args.force_profile, stats=args.stats, trace_plan=args.trace_plan,
+                   restore_state=argv is not None, source=source,
+                   module_spec=module_spec, module_invocation=module_invocation,
+                   compiled_code=compiled_code, initial_main=initial_main,
+                   entry_kind=entry_kind, entry_argument=entry_argument, runtime=module_runtime,
+                   preparation_started=module_started, resolved_seconds=module_config_seconds,
+                   interactive=args.interactive)
     except AiythonError as exc:
         # Keep the original runtime cause visible without leaking provider internals.
         if exc.__cause__:
@@ -186,3 +634,6 @@ def main(argv=None):
             traceback.print_exception(exc.__cause__)
         print(f"aiython: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
+    finally:
+        if original_path is not None:
+            sys.path[:] = original_path

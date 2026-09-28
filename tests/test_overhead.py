@@ -15,8 +15,8 @@ from unittest.mock import Mock, patch
 
 from aiython.capabilities import Store, CapabilityResult, Embeddings
 from aiython.cli import run_script
-from aiython.frontend import RUNTIME_NAME
 from aiython.models import ProfileConfig, ResolvedConfig
+from aiython.native_bridge import vm_available
 from aiython.providers import LiteLLMProvider
 from aiython.runtime import Runtime
 from aiython.type_constraints import ContractCache, TypeViolation, compile_contract
@@ -24,6 +24,100 @@ from aiython.stats import CURRENT_STATS, InvocationStats
 
 
 class OverheadTests(unittest.TestCase):
+    def test_plain_source_uses_cpython_code_object(self):
+        source = ('def values():\n'
+                  '    yield from (1, 2)\n'
+                  'result = list(values())\n')
+        filename = '<plain-native-source>'
+        runtime = Runtime(ResolvedConfig(None, Path.cwd()), stats=True)
+        try:
+            with patch.object(runtime.bridge, 'prepare_unit',
+                              wraps=runtime.bridge.prepare_unit) as prepare:
+                code = runtime.compile_source(source, filename, entry=True)
+            prepare.assert_called_once()
+            self.assertEqual(code, compile(source, filename, 'exec', dont_inherit=True))
+            self.assertIs(code, runtime.compile_source(source, filename, entry=True))
+            self.assertEqual(runtime.stats.preparation_cache_hits, 1)
+            namespace = {}
+            exec(code, namespace)
+            self.assertEqual(namespace['result'], [1, 2])
+            self.assertFalse(runtime.checkpoints)
+        finally:
+            runtime.capabilities.close()
+
+    def test_native_cache_stops_after_typed_class_registration(self):
+        source = 'value = 1\n'
+        filename = '<typed-class-cache>'
+        runtime = Runtime(ResolvedConfig(None, Path.cwd()))
+        try:
+            native = runtime.compile_source(source, filename, entry=True)
+            class Box:
+                value: int
+            runtime.types.register_class(Box)
+            checked = runtime.compile_source(source, filename, entry=True)
+            self.assertEqual(native, compile(source, filename, 'exec', dont_inherit=True))
+            self.assertNotEqual(checked, native)
+        finally:
+            runtime.capabilities.close()
+
+    def test_reused_module_namespace_retains_global_contract(self):
+        runtime = Runtime(ResolvedConfig(None, Path.cwd()))
+        namespace = {}
+        try:
+            exec(runtime.compile_source('value: int = 1\n', '<first-exec>'), namespace)
+            source = 'value = "invalid"\n'
+            code = runtime.compile_source(source, '<second-exec>')
+            self.assertNotEqual(code, compile(source, '<second-exec>', 'exec', dont_inherit=True))
+            with self.assertRaises(TypeViolation):
+                exec(code, namespace)
+            self.assertEqual(namespace['value'], 1)
+        finally:
+            runtime.capabilities.close()
+
+    def test_preparation_cache_separates_configured_recovery(self):
+        filename = '<recovery-cache>'
+        source = '1 / 0\n'
+        profile = ProfileConfig('default', 'fake', 'fake')
+        configured = Runtime(ResolvedConfig(None, Path.cwd(), 'default',
+                                             {'default': profile}))
+        unconfigured = Runtime(ResolvedConfig(None, Path.cwd()))
+        try:
+            configured.compile_source(source, filename, entry=True)
+            unconfigured.compile_source(source, filename, entry=True)
+            self.assertTrue(configured.checkpoints)
+            self.assertFalse(unconfigured.checkpoints)
+        finally:
+            configured.capabilities.close()
+            unconfigured.capabilities.close()
+
+    def test_preparation_preserves_native_source_tree_and_type_checks(self):
+        source = 'value: int = 1\nvalue = "bad"\n'
+        filename = '<native-source-tree>'
+        config = ResolvedConfig(None, Path.cwd())
+        runtime = Runtime(config)
+        try:
+            code = runtime.compile_source(source, filename, entry=True)
+            original = compile(source, filename, 'exec', dont_inherit=True)
+            unit = runtime.units[filename]
+            self.assertEqual(compile(unit.tree, filename, 'exec', dont_inherit=True), original)
+            self.assertEqual(code == original, vm_available())
+            self.assertEqual(runtime.bridge.uses_vm(code), vm_available())
+            with self.assertRaises(TypeViolation):
+                exec(code, {})
+        finally:
+            runtime.capabilities.close()
+        cached_runtime = Runtime(config, stats=True)
+        try:
+            cached_code = cached_runtime.compile_source(source, filename, entry=True)
+            self.assertEqual(cached_runtime.stats.preparation_cache_hits,
+                             0 if vm_available() else 1)
+            self.assertEqual(compile(cached_runtime.units[filename].tree, filename, 'exec',
+                                     dont_inherit=True), original)
+            with self.assertRaises(TypeViolation):
+                exec(cached_code, {})
+        finally:
+            cached_runtime.capabilities.close()
+
     def test_primitive_containers_keep_strict_types_and_error_paths(self):
         for annotation, good, bad, path in [
             ('list[int]', [1, 2], [1, True], 'value[1]'),
@@ -65,16 +159,18 @@ class OverheadTests(unittest.TestCase):
             first, second = Runtime(config, stats=True), Runtime(config, stats=True)
             code_a = first.compile_source(source, str(path), entry=True)
             code_b = second.compile_source(source, str(path), entry=True)
-            self.assertIs(code_a, code_b)
+            self.assertIsNot(code_a, code_b)
+            self.assertIs(code_a, first.compile_source(source, str(path), entry=True))
             self.assertEqual(second.stats.preparation_cache_hits, 1)
             self.assertIsNot(first.units[str(path)], second.units[str(path)])
             self.assertEqual(set(first.checkpoints), set(second.checkpoints))
-            left, right = {RUNTIME_NAME: first}, {RUNTIME_NAME: second}
+            left, right = {}, {}
             exec(code_a, left)
             exec(code_b, right)
+            self.assertFalse(any(name.startswith('__aiython_runtime') for name in left | right))
             self.assertIsNot(left['answer'], right['answer'])
             changed = Runtime(config)
-            namespace = {RUNTIME_NAME: changed}
+            namespace = {}
             exec(changed.compile_source(source.replace('append(1)', 'append(2)'), str(path), entry=True), namespace)
             self.assertEqual(namespace['answer'], [2])
             self.assertEqual(left['answer'], [1])
@@ -105,7 +201,7 @@ class OverheadTests(unittest.TestCase):
             source = 'items: list[int] = [1, 2]\nalias = items\nmutate(alias)\nanswer = items\n'
             for _ in range(2):
                 runtime = Runtime(config)
-                namespace = {RUNTIME_NAME: runtime, 'mutate': lambda values: values.__setitem__(0, True)}
+                namespace = {'mutate': lambda values: values.__setitem__(0, True)}
                 with self.assertRaises(TypeViolation):
                     exec(runtime.compile_source(source, str(path), entry=True), namespace)
 
