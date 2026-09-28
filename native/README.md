@@ -63,10 +63,11 @@ entry point called by `Runtime.compile_source`. It selects the exact CPython
 code object for ordinary source without imports, annotations, AI directives,
 blocks, or configured recovery. For annotated source and configured recovery,
 it delegates to Aiython's boundary compiler; that path checks yielded values
-and can resume failed statements. This routing works on stock CPython and the
-four pinned patched interpreters.
+and can resume failed statements. A bridge bound to a `Runtime` offers the
+same behavior through `compile_source`. This routing works on stock CPython
+and the four pinned patched interpreters.
 
-The separate experimental `NativeTypeBridge.compile_source` and `installed`
+The standalone experimental `NativeTypeBridge.compile_source` and `installed`
 API parses annotations, compiles the original source, and validates annotated
 parameters, generator returns, local/global/nonlocal assignments, `Final`
 rebinding, and class attributes through the VM hooks. It does not yet check

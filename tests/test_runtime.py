@@ -7,6 +7,7 @@ from unittest.mock import patch
 from aiython.cli import run_script
 from aiython.models import AiythonError, ProfileConfig, RecoveryDecision, ResolvedConfig
 from aiython.native_bridge import NativeTypeBridge
+from aiython.runtime import Runtime
 
 
 class FakeAgent:
@@ -60,6 +61,30 @@ answer = missing_value
         self.assertTrue(result['caught'])
         self.assertEqual(result['answer'], 42)
         self.assertEqual(len(agent.errors), 1)
+
+    def test_managed_bridge_compiles_recovery_and_typed_yield_directly(self):
+        agent = FakeAgent(recover=lambda request, runtime:
+                          RecoveryDecision('complete', 42, True))
+        profile = ProfileConfig('fast', 'fake', 'fast')
+        runtime = Runtime(ResolvedConfig(None, Path.cwd(), 'fast', {'fast': profile}),
+                          agent_factory=lambda _: agent)
+        try:
+            code = runtime.bridge.compile_source('''from typing import Generator
+def values() -> Generator[int, None, None]:
+    yield "invalid"
+try:
+    next(values())
+except TypeError:
+    caught = True
+answer = missing_value
+''', '<direct-managed-bridge>', entry=True)
+            namespace = {}
+            exec(code, namespace)
+            self.assertTrue(namespace['caught'])
+            self.assertEqual(namespace['answer'], 42)
+            self.assertEqual(len(agent.errors), 1)
+        finally:
+            runtime.capabilities.close()
 
     def test_plain_python_and_handled_error_never_call_agent(self):
         agent = FakeAgent()

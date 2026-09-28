@@ -58,8 +58,9 @@ class NativeTypeBridge:
 
     ``prepare_unit`` is the normal runtime entry point. It compiles plain
     source directly with CPython, while annotated source, typed yields and AI
-    recovery use the existing Aiython boundary compiler. ``compile_source``
-    and ``installed`` expose the experimental patched-VM hooks separately.
+    recovery use the existing Aiython boundary compiler. A bridge bound to a
+    Runtime also exposes this behavior through ``compile_source``. Without a
+    Runtime, ``compile_source`` and ``installed`` expose patched-VM hooks.
     """
 
     _HOOKS = ('_aiython_before_store', '_aiython_before_mutation',
@@ -121,7 +122,12 @@ class NativeTypeBridge:
             len(unit.source), None, unit.source.splitlines(True), unit.filename)
         return compile(unit.source, unit.filename, 'exec', dont_inherit=True), True
 
-    def compile_source(self, source: str, filename: str):
+    def compile_source(self, source: str, filename: str, *, entry=False):
+        if self.manager is not None:
+            from .frontend import parse
+            unit = parse(source, filename)
+            code, native = self.prepare_unit(unit, entry=entry)
+            return code if native else self.manager._bind_compiled(code, unit.runtime_name)
         tree = ast.parse(source, filename)
         module = _FrameTypes(TypedTransformer.declarations_in(tree.body), {}, None,
                              frozenset())
