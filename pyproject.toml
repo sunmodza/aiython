@@ -32,6 +32,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://sunmodza.github.io/aiython-docs/"
 Documentation = "https://sunmodza.github.io/aiython-docs/"
+Repository = "https://github.com/sunmodza/aiython"
+Issues = "https://github.com/sunmodza/aiython/issues"
+Changelog = "https://github.com/sunmodza/aiython/releases"
 
 [project.scripts]
 aiython = "aiython:main"
