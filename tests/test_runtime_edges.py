@@ -174,14 +174,15 @@ class RuntimePreparationEdgeTests(unittest.TestCase):
 
 class RuntimeRecoveryEdgeTests(unittest.TestCase):
     def setUp(self):
-        self.manager = rt.Runtime(ResolvedConfig(None, Path.cwd()))
+        profile = ProfileConfig('test', 'fake', 'model')
+        self.manager = rt.Runtime(ResolvedConfig(None, Path.cwd(), 'test', {'test': profile}))
         self.unit = parse('answer = 1 / 0', 'recovery-test.py')
         self.span = SourceSpan(self.unit.filename, 1, 0, 1, 14)
         self.manager.units[self.unit.filename] = self.unit
         self.manager.checkpoints['failure'] = rt.Checkpoint(
             self.unit, self.span, 'answer = 1 / 0', 'answer')
         self.request = AgentRequest('answer = 1 / 0', self.unit.source, {}, {},
-                                    self.span, ProfileConfig('test', 'fake', 'model'), ())
+                                    self.span, profile, ())
         self.agent = SimpleNamespace(recover=Mock(return_value=RecoveryDecision('complete')))
 
     def recover(self, error, decision, *, attempt=1, target='answer'):

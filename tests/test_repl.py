@@ -36,6 +36,16 @@ class InteractiveConsoleTests(unittest.TestCase):
         else:
             vars(builtins).pop('_', None)
 
+    def test_display_keeps_native_cell_tree(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertFalse(self.console.runsource('1 + 2'))
+        self.assertEqual(output.getvalue(), '3\n')
+        filename = '<stdin:1>'
+        source_tree = self.runtime.units[filename].tree
+        self.assertEqual(compile(source_tree, filename, 'exec', dont_inherit=True),
+                         compile('1 + 2', filename, 'exec', dont_inherit=True))
+
     def test_compound_input_waits_and_displays_last_expression(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

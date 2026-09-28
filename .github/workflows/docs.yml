@@ -38,8 +38,8 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          python-version: "3.11"
+          python-version: "3.11.16"
           version: latest-known
           enable-cache: false
-      - run: uv run --locked zensical build --clean --strict
-      - run: uv run --locked python scripts/check_docs_site.py
+      - run: uv run --locked --python 3.11.16 zensical build --clean --strict
+      - run: uv run --locked --python 3.11.16 python scripts/check_docs_site.py

@@ -1,7 +1,7 @@
-"""Check that Aiython compiles the current interpreter's standard library.
+"""Check the frontend against CPython and compile the standard library.
 
 Run: uv run python benchmarks/stdlib_syntax.py
-This checks syntax transformation only; it does not execute the modules.
+This checks compilation only; it does not execute the modules.
 """
 
 import argparse
@@ -10,6 +10,7 @@ from pathlib import Path
 import sysconfig
 import tokenize
 
+from aiython.frontend import parse
 from aiython.models import ProfileConfig, ResolvedConfig
 from aiython.runtime import Runtime
 
@@ -39,8 +40,20 @@ def main():
         try:
             with tokenize.open(path) as file:
                 source = file.read()
-            compile(source, str(path), 'exec', dont_inherit=True)
+            native = compile(source, str(path), 'exec', dont_inherit=True)
+            unit = parse(source, str(path))
+            if unit.blocks:
+                raise AssertionError('valid Python source was classified as AI syntax')
+            frontend_code = compile(unit.tree, str(path), 'exec', dont_inherit=True)
+            # CPython compares code contents, including nested code objects.
+            # marshal byte streams can differ in reference encoding even when
+            # the code objects are equal; both compiles use the same filename.
+            if frontend_code != native:
+                raise AssertionError('frontend changed the native CPython code object')
             runtime.compile_source(source, str(path))
+            source_tree = runtime.units[str(path)].tree
+            if compile(source_tree, str(path), 'exec', dont_inherit=True) != native:
+                raise AssertionError('runtime preparation changed the native source tree')
         except Exception as error:
             failures.append((path.relative_to(root), error))
         if (index + 1) % 100 == 0:

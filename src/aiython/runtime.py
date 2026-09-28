@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from collections import OrderedDict
+import copy
 import hashlib
 from functools import lru_cache
 import inspect
@@ -708,6 +709,8 @@ class Runtime:
         self.config = config
         from .typed_runtime import TypeRuntime
         self.types = TypeRuntime(self)
+        from .native_bridge import NativeTypeBridge
+        self.bridge = NativeTypeBridge(self.types, manager=self)
         from .capabilities import CapabilityRuntime
         self.capabilities = CapabilityRuntime(config, trace=trace_plan)
         self.agent_factory = agent_factory
@@ -735,14 +738,16 @@ class Runtime:
     def compile_source(self, source, filename, *, entry=False):
         """Reuse preparation across executions, always restoring fresh metadata."""
         from .frontend import parse
-        key = (type(self), sys.implementation.cache_tag, filename, self.source_revision(source), entry)
+        key = (type(self), sys.implementation.cache_tag, filename,
+               self.source_revision(source), entry, bool(self.config.profiles),
+               bool(self.types.classes), bool(self.types._module_scopes))
         started = perf_counter()
         with _PREPARED_LOCK:
             cached = _PREPARED.get(key)
             if cached is not None:
                 _PREPARED.move_to_end(key)
         if cached is not None:
-            code, packet = cached
+            code, packet, native = cached
             unit, blocks, checkpoints, frames, nodes, names, hints = pickle.loads(packet)
             with self._lock:
                 self.units[filename] = unit
@@ -756,12 +761,16 @@ class Runtime:
             if self.stats.enabled:
                 self.stats.preparation_cache_hits += 1
                 self.stats.prepare_seconds += perf_counter() - started
-            return self._bind_compiled(code, unit.runtime_name)
+            return code if native else self._bind_compiled(code, unit.runtime_name)
         unit = parse(source, filename)
         if self.stats.enabled:
             self.stats.parse_seconds += perf_counter() - started
             self.stats.preparation_cache_misses += 1
-        code = self.prepare(unit, entry=entry)
+        prepared = perf_counter()
+        code, native = self.bridge.prepare_unit(unit, entry=entry)
+        if native:
+            if self.stats.enabled:
+                self.stats.prepare_seconds += perf_counter() - prepared
         # Large generated programs run normally without displacing the cache.
         if len(source) <= 256 * 1024:
             with self._lock:
@@ -774,10 +783,11 @@ class Runtime:
                     {node: self.source_hints[node] for node in ast.walk(unit.tree)
                      if node in self.source_hints}))
             with _PREPARED_LOCK:
-                _PREPARED[key] = (code, packet)
+                _PREPARED[key] = (code, packet, native)
                 while len(_PREPARED) > _PREPARED_LIMIT or sum(len(v[1]) for v in _PREPARED.values()) > _PREPARED_BYTES:
                     _PREPARED.popitem(last=False)
-        return self._bind_compiled(code, unit.runtime_name, cache=len(source) <= 256 * 1024)
+        return (code if native else
+                self._bind_compiled(code, unit.runtime_name, cache=len(source) <= 256 * 1024))
 
     def _bind_compiled(self, code, runtime_name, *, cache=True):
         if not cache:
@@ -825,21 +835,35 @@ class Runtime:
         return self.frame_sources.get(key, self.frame_sources.get(
             (code.co_filename, 1, "<module>"), {"available": False, "filename": code.co_filename}))
 
-    def prepare(self, unit: Unit, *, entry: bool = False, flags: int = 0):
+    def prepare(self, unit: Unit, *, entry: bool = False, flags: int = 0,
+                display_last_expr: bool = False, recovery_metadata: bool = False):
         started = perf_counter()
         try:
             with self._lock:
-                return self._prepare(unit, entry=entry, flags=flags)
+                return self._prepare(unit, entry=entry, flags=flags,
+                                     display_last_expr=display_last_expr,
+                                     recovery_metadata=recovery_metadata)
         finally:
             if self.stats.enabled:
                 self.stats.prepare_seconds += perf_counter() - started
 
-    def _prepare(self, unit: Unit, *, entry: bool = False, flags: int = 0):
+    def _prepare(self, unit: Unit, *, entry: bool = False, flags: int = 0,
+                 display_last_expr: bool = False, recovery_metadata: bool = False):
         self.register(unit)
         self.blocks.update({key: (unit, block) for key, block in unit.blocks.items()})
         linecache.cache[unit.filename] = (len(unit.source), None, unit.source.splitlines(True), unit.filename)
-        tree = unit.tree
-        from .typed_runtime import ExpectedTypes, TypedTransformer
+        # Keep the CPython-parsed tree as source metadata. Runtime checks and
+        # recovery transform a separate tree until they can move to VM hooks.
+        # Reparse valid source: CPython's parser is faster than deepcopy for
+        # large ASTs. AI blocks need their remapped locations copied intact.
+        tree = (copy.deepcopy(unit.tree) if unit.blocks else
+                ast.parse(unit.source, unit.filename))
+        from .typed_runtime import ExpectedTypes, TypedTransformer, helper
+        if display_last_expr and tree.body and isinstance(tree.body[-1], ast.Expr):
+            expression = tree.body[-1]
+            expression.value = ast.copy_location(
+                helper('display', expression.value, runtime_name=unit.runtime_name),
+                expression.value)
         ExpectedTypes(unit.blocks, unit.runtime_name).visit(tree)
         tables = [symtable.symtable(unit.transformed, unit.filename, "exec")]
         definitions = {(n.name, n.lineno): min([n.lineno, *(d.lineno for d in n.decorator_list)])
@@ -856,9 +880,11 @@ class Runtime:
         tree = TypedTransformer(runtime_name=unit.runtime_name).visit(tree)
         if unit.blocks and any(isinstance(node, ast.AsyncFunctionDef) for node in ast.walk(tree)):
             tree = AsyncCalls(unit.runtime_name).visit(tree)
-        tree = NestedCheckpoints(self, unit).visit(tree)
+        recovery_enabled = bool(self.config.profiles) or recovery_metadata
+        if recovery_enabled:
+            tree = NestedCheckpoints(self, unit).visit(tree)
         ast.fix_missing_locations(tree)
-        if entry:
+        if entry and recovery_enabled:
             guard = next((node for node in tree.body if getattr(node, '_aiython_module_guard', False)), None)
             if guard is not None:
                 body = []
@@ -972,7 +998,48 @@ class Runtime:
         import concurrent.futures
         return not isinstance(error, concurrent.futures.CancelledError)
 
+    def caller_has_python_handler(self, frame) -> bool:
+        """Let an enclosing user try/with body receive the exception first."""
+        scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        protected_types = (ast.Try, ast.TryStar, ast.With, ast.AsyncWith)
+        caller = frame.f_back
+        while caller is not None:
+            unit = self.units.get(caller.f_code.co_filename)
+            if unit is not None:
+                code = caller.f_code
+                scope = unit.tree if code.co_name == '<module>' else None
+                if scope is None:
+                    for candidate in ast.walk(unit.tree):
+                        if not isinstance(candidate, scope_types):
+                            continue
+                        name = '<lambda>' if isinstance(candidate, ast.Lambda) else candidate.name
+                        first = min([candidate.lineno,
+                                     *(node.lineno for node in getattr(candidate, 'decorator_list', ()))])
+                        if (name == code.co_name and
+                                code.co_firstlineno in (first, candidate.lineno)):
+                            scope = candidate
+                            break
+                if scope is not None:
+                    pending = [scope]
+                    while pending:
+                        node = pending.pop()
+                        if node is not scope and isinstance(node, scope_types):
+                            continue
+                        if isinstance(node, protected_types):
+                            bodies = [node.body]
+                            if isinstance(node, (ast.Try, ast.TryStar)) and node.finalbody:
+                                bodies.extend(handler.body for handler in node.handlers)
+                                bodies.append(node.orelse)
+                            for body in bodies:
+                                if body and body[0].lineno <= caller.f_lineno <= body[-1].end_lineno:
+                                    return True
+                        pending.extend(ast.iter_child_nodes(node))
+            caller = caller.f_back
+        return False
+
     def recover(self, key: str, error: BaseException, attempt: int | None = None) -> bool:
+        if not self.config.profiles:
+            raise error
         if not self.recoverable(error):
             from .type_constraints import TypeViolation, UnsupportedType
             if isinstance(error, (TypeViolation, UnsupportedType)) and not getattr(error, '_aiython_location', False):
@@ -988,6 +1055,8 @@ class Runtime:
             raise error
         checkpoint = self.checkpoints[key]
         frame = inspect.currentframe().f_back
+        if self.caller_has_python_handler(frame):
+            raise error
         # Function/module boundaries pass their own counter. Class boundaries
         # keep theirs outside the metaclass's namespace.
         counts = None

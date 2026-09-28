@@ -2,9 +2,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aiython.cli import run_script
 from aiython.models import AiythonError, ProfileConfig, RecoveryDecision, ResolvedConfig
+from aiython.native_bridge import NativeTypeBridge
 
 
 class FakeAgent:
@@ -37,6 +39,27 @@ class RuntimeTests(unittest.TestCase):
             profiles = {n: ProfileConfig(n, "fake", n, prompt=f"{n} hint") for n in ("fast", "quality", "local")}
             config = ResolvedConfig(None, root, "fast", profiles, force_profile=force)
             return run_script(path, config=config, agent_factory=lambda p: agent or FakeAgent())
+
+    def test_configured_recovery_and_generator_yield_contract(self):
+        agent = FakeAgent(recover=lambda request, runtime:
+                          RecoveryDecision('complete', 42, True))
+        original = NativeTypeBridge.prepare_unit
+        with patch.object(NativeTypeBridge, 'prepare_unit', autospec=True,
+                          side_effect=original) as prepare:
+            result = self.run_source('''from typing import Generator
+def values() -> Generator[int, None, None]:
+    yield 1
+    yield "invalid"
+try:
+    list(values())
+except TypeError:
+    caught = True
+answer = missing_value
+''', agent)
+        prepare.assert_called_once()
+        self.assertTrue(result['caught'])
+        self.assertEqual(result['answer'], 42)
+        self.assertEqual(len(agent.errors), 1)
 
     def test_plain_python_and_handled_error_never_call_agent(self):
         agent = FakeAgent()
@@ -238,6 +261,45 @@ for _ in range(2):
 ''', agent)
         self.assertEqual(result['events'], ['handled', 'handled'])
         self.assertFalse(agent.errors)
+
+    def test_caller_try_and_with_handle_error_before_ai_recovery(self):
+        agent = FakeAgent()
+        result = self.run_source('''from contextlib import suppress
+def fail():
+    return 1 / 0
+def relay():
+    return fail()
+events = []
+try:
+    relay()
+except ZeroDivisionError:
+    events.append('except')
+with suppress(ZeroDivisionError):
+    relay()
+events.append('after with')
+''', agent)
+        self.assertEqual(result['events'], ['except', 'after with'])
+        self.assertFalse(agent.errors)
+
+    def test_caller_finally_runs_before_ai_recovery(self):
+        observed = []
+        def repair(request, bridge):
+            observed.extend(bridge.eval('events'))
+            return RecoveryDecision('complete')
+        agent = FakeAgent(recover=repair)
+        result = self.run_source('''events = []
+def fail():
+    raise ValueError('bad')
+try:
+    raise KeyError('first')
+except KeyError:
+    fail()
+finally:
+    events.append('finally')
+''', agent)
+        self.assertEqual(result['events'], ['finally'])
+        self.assertEqual(observed, ['finally'])
+        self.assertEqual(len(agent.errors), 1)
 
     def test_enclosing_loop_retry_is_rejected_without_replaying_effects(self):
         seen = []

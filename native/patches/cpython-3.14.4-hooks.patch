@@ -1,0 +1,764 @@
+diff --git a/Python/bytecodes.c b/Python/bytecodes.c
+index a477fdd..08d6598 100644
+--- a/Python/bytecodes.c
++++ b/Python/bytecodes.c
+@@ -221,11 +221,19 @@ dummy_func(
+             #endif
+         }
+ 
++        op(_AIYTHON_FUNCTION_ENTRY, (--)) {
++            if (oparg == 0) {
++                int err = aiython_function_event(frame, "_aiython_on_call", NULL);
++                ERROR_IF(err);
++            }
++        }
++
+         macro(RESUME) =
+             _LOAD_BYTECODE +
+             _MAYBE_INSTRUMENT +
+             _QUICKEN_RESUME +
+-            _CHECK_PERIODIC_IF_NOT_YIELD_FROM;
++            _CHECK_PERIODIC_IF_NOT_YIELD_FROM +
++            _AIYTHON_FUNCTION_ENTRY;
+ 
+         inst(RESUME_CHECK, (--)) {
+ #if defined(__EMSCRIPTEN__)
+@@ -240,6 +248,10 @@ dummy_func(
+             DEOPT_IF(frame->tlbc_index !=
+                      ((_PyThreadStateImpl *)tstate)->tlbc_index);
+             #endif
++            if (oparg == 0) {
++                int err = aiython_function_event(frame, "_aiython_on_call", NULL);
++                ERROR_IF(err);
++            }
+         }
+ 
+         op(_MONITOR_RESUME, (--)) {
+@@ -256,7 +268,8 @@ dummy_func(
+             _LOAD_BYTECODE +
+             _MAYBE_INSTRUMENT +
+             _CHECK_PERIODIC_IF_NOT_YIELD_FROM +
+-            _MONITOR_RESUME;
++            _MONITOR_RESUME +
++            _AIYTHON_FUNCTION_ENTRY;
+ 
+         pseudo(LOAD_CLOSURE, (-- unused)) = {
+             LOAD_FAST,
+@@ -352,6 +365,12 @@ dummy_func(
+                 ((_PyFrame_GetCode(frame)->co_flags & (CO_COROUTINE | CO_GENERATOR)) == 0) ||
+                 PyStackRef_IsHeapSafe(value)
+             );
++            PyObject *name = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg);
++            int err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(value));
++            if (err < 0) {
++                PyStackRef_CLOSE(value);
++                ERROR_IF(true);
++            }
+             _PyStackRef tmp = GETLOCAL(oparg);
+             GETLOCAL(oparg) = value;
+             DEAD(value);
+@@ -369,6 +388,12 @@ dummy_func(
+             );
+             uint32_t oparg1 = oparg >> 4;
+             uint32_t oparg2 = oparg & 15;
++            PyObject *name = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg1);
++            int err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(value1));
++            if (err < 0) {
++                PyStackRef_CLOSE(value1);
++                ERROR_IF(true);
++            }
+             _PyStackRef tmp = GETLOCAL(oparg1);
+             GETLOCAL(oparg1) = value1;
+             DEAD(value1);
+@@ -387,10 +412,23 @@ dummy_func(
+             );
+             uint32_t oparg1 = oparg >> 4;
+             uint32_t oparg2 = oparg & 15;
++            PyObject *name1 = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg1);
++            PyObject *name2 = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg2);
++            int err = aiython_before_store(frame, name1, PyStackRef_AsPyObjectBorrow(value1));
++            if (err < 0) {
++                PyStackRef_CLOSE(value1);
++                PyStackRef_CLOSE(value2);
++                ERROR_IF(true);
++            }
+             _PyStackRef tmp = GETLOCAL(oparg1);
+             GETLOCAL(oparg1) = value1;
+             DEAD(value1);
+             PyStackRef_XCLOSE(tmp);
++            err = aiython_before_store(frame, name2, PyStackRef_AsPyObjectBorrow(value2));
++            if (err < 0) {
++                PyStackRef_CLOSE(value2);
++                ERROR_IF(true);
++            }
+             tmp = GETLOCAL(oparg2);
+             GETLOCAL(oparg2) = value2;
+             DEAD(value2);
+@@ -761,6 +799,8 @@ dummy_func(
+         // specializations, but there is no output.
+         // At the end we just skip over the STORE_FAST.
+         op(_BINARY_OP_INPLACE_ADD_UNICODE, (left, right --)) {
++            int store_hook_enabled = aiython_store_hook_enabled();
++            DEOPT_IF(store_hook_enabled);
+             PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+             assert(PyUnicode_CheckExact(left_o));
+             assert(PyUnicode_CheckExact(PyStackRef_AsPyObjectBorrow(right)));
+@@ -879,7 +919,13 @@ dummy_func(
+                 err = 1;
+             }
+             else {
+-                err = PyObject_SetItem(PyStackRef_AsPyObjectBorrow(container), slice, PyStackRef_AsPyObjectBorrow(v));
++                err = aiython_before_mutation(frame, "item",
++                        PyStackRef_AsPyObjectBorrow(container), slice,
++                        PyStackRef_AsPyObjectBorrow(v));
++                if (err == 0) {
++                    err = PyObject_SetItem(PyStackRef_AsPyObjectBorrow(container), slice,
++                                           PyStackRef_AsPyObjectBorrow(v));
++                }
+                 Py_DECREF(slice);
+             }
+             DECREF_INPUTS();
+@@ -1080,15 +1126,27 @@ dummy_func(
+ 
+         op(_STORE_SUBSCR, (v, container, sub -- )) {
+             /* container[sub] = v */
+-            int err = PyObject_SetItem(PyStackRef_AsPyObjectBorrow(container), PyStackRef_AsPyObjectBorrow(sub), PyStackRef_AsPyObjectBorrow(v));
++            int err = aiython_before_mutation(frame, "item",
++                    PyStackRef_AsPyObjectBorrow(container),
++                    PyStackRef_AsPyObjectBorrow(sub), PyStackRef_AsPyObjectBorrow(v));
++            if (err == 0) {
++                err = PyObject_SetItem(PyStackRef_AsPyObjectBorrow(container),
++                                       PyStackRef_AsPyObjectBorrow(sub),
++                                       PyStackRef_AsPyObjectBorrow(v));
++            }
+             DECREF_INPUTS();
+             ERROR_IF(err);
+         }
+ 
++        op(_AIYTHON_DEOPT_MUTATION, (--)) {
++            int hook_enabled = aiython_mutation_hook_enabled();
++            DEOPT_IF(hook_enabled);
++        }
++
+         macro(STORE_SUBSCR) = _SPECIALIZE_STORE_SUBSCR + _STORE_SUBSCR;
+ 
+         macro(STORE_SUBSCR_LIST_INT) =
+-            _GUARD_TOS_INT + _GUARD_NOS_LIST + unused/1 + _STORE_SUBSCR_LIST_INT;
++            _AIYTHON_DEOPT_MUTATION + _GUARD_TOS_INT + _GUARD_NOS_LIST + unused/1 + _STORE_SUBSCR_LIST_INT;
+ 
+         op(_STORE_SUBSCR_LIST_INT, (value, list_st, sub_st -- )) {
+             PyObject *sub = PyStackRef_AsPyObjectBorrow(sub_st);
+@@ -1120,7 +1178,7 @@ dummy_func(
+         }
+ 
+         macro(STORE_SUBSCR_DICT) =
+-            _GUARD_NOS_DICT + unused/1 + _STORE_SUBSCR_DICT;
++            _AIYTHON_DEOPT_MUTATION + _GUARD_NOS_DICT + unused/1 + _STORE_SUBSCR_DICT;
+ 
+         op(_STORE_SUBSCR_DICT, (value, dict_st, sub -- )) {
+             PyObject *dict = PyStackRef_AsPyObjectBorrow(dict_st);
+@@ -1201,6 +1259,12 @@ dummy_func(
+         // is pushed to a different frame, the callers' frame.
+         inst(RETURN_VALUE, (retval -- res)) {
+             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
++            int hook_err = aiython_function_event(frame, "_aiython_on_return",
++                    PyStackRef_AsPyObjectBorrow(retval));
++            if (hook_err < 0) {
++                PyStackRef_CLOSE(retval);
++                ERROR_IF(true);
++            }
+             _PyStackRef temp = PyStackRef_MakeHeapSafe(retval);
+             DEAD(retval);
+             SAVE_STACK();
+@@ -1516,6 +1580,11 @@ dummy_func(
+                 PyStackRef_CLOSE(v);
+                 ERROR_IF(true);
+             }
++            err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(v));
++            if (err < 0) {
++                PyStackRef_CLOSE(v);
++                ERROR_IF(true);
++            }
+             if (PyDict_CheckExact(ns)) {
+                 err = PyDict_SetItem(ns, name, PyStackRef_AsPyObjectBorrow(v));
+             }
+@@ -1651,8 +1720,13 @@ dummy_func(
+ 
+         op(_STORE_ATTR, (v, owner --)) {
+             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+-            int err = PyObject_SetAttr(PyStackRef_AsPyObjectBorrow(owner),
++            int err = aiython_before_mutation(frame, "attr",
++                    PyStackRef_AsPyObjectBorrow(owner), name,
++                    PyStackRef_AsPyObjectBorrow(v));
++            if (err == 0) {
++                err = PyObject_SetAttr(PyStackRef_AsPyObjectBorrow(owner),
+                                        name, PyStackRef_AsPyObjectBorrow(v));
++            }
+             DECREF_INPUTS();
+             ERROR_IF(err);
+         }
+@@ -1668,6 +1742,11 @@ dummy_func(
+ 
+         inst(STORE_GLOBAL, (v --)) {
+             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
++            int hook_err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(v));
++            if (hook_err < 0) {
++                PyStackRef_CLOSE(v);
++                ERROR_IF(true);
++            }
+             int err = PyDict_SetItem(GLOBALS(), name, PyStackRef_AsPyObjectBorrow(v));
+             PyStackRef_CLOSE(v);
+             ERROR_IF(err);
+@@ -1919,6 +1998,12 @@ dummy_func(
+         }
+ 
+         inst(STORE_DEREF, (v --)) {
++            PyObject *name = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg);
++            int err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(v));
++            if (err < 0) {
++                PyStackRef_CLOSE(v);
++                ERROR_IF(true);
++            }
+             PyCellObject *cell = (PyCellObject *)PyStackRef_AsPyObjectBorrow(GETLOCAL(oparg));
+             PyCell_SetTakeRef(cell, PyStackRef_AsPyObjectSteal(v));
+         }
+@@ -2577,6 +2662,7 @@ dummy_func(
+ 
+         macro(STORE_ATTR_INSTANCE_VALUE) =
+             unused/1 +
++            _AIYTHON_DEOPT_MUTATION +
+             _GUARD_TYPE_VERSION_AND_LOCK +
+             _GUARD_DORV_NO_DICT +
+             _STORE_ATTR_INSTANCE_VALUE;
+@@ -2623,6 +2709,7 @@ dummy_func(
+ 
+         macro(STORE_ATTR_WITH_HINT) =
+             unused/1 +
++            _AIYTHON_DEOPT_MUTATION +
+             _GUARD_TYPE_VERSION +
+             _STORE_ATTR_WITH_HINT;
+ 
+@@ -2641,6 +2728,7 @@ dummy_func(
+ 
+         macro(STORE_ATTR_SLOT) =
+             unused/1 +
++            _AIYTHON_DEOPT_MUTATION +
+             _GUARD_TYPE_VERSION +
+             _STORE_ATTR_SLOT;
+ 
+diff --git a/Python/ceval.c b/Python/ceval.c
+index 377b464..d459d64 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -1141,6 +1141,121 @@ typedef struct {
+     _PyStackRef stack[1];
+ } _PyEntryFrame;
+ 
++/* Experimental Aiython hook. The Python callback can raise to reject a store.
++   The guard prevents assignments inside that callback from calling it again. */
++static _Thread_local int aiython_in_hook = 0;
++
++static int
++aiython_before_store(_PyInterpreterFrame *frame, PyObject *name, PyObject *value)
++{
++    /* STORE_FAST_MAYBE_NULL may legally write an empty stack reference. */
++    if (value == NULL || aiython_in_hook) {
++        return 0;
++    }
++    PyObject *callback = NULL;
++    int found = _PySys_GetOptionalAttrString("_aiython_before_store", &callback);
++    if (found <= 0) {
++        return found < 0 ? -1 : 0;
++    }
++    PyFrameObject *borrowed = _PyFrame_GetFrameObject(frame);
++    if (borrowed == NULL) {
++        Py_DECREF(callback);
++        return -1;
++    }
++    PyObject *frame_obj = Py_NewRef(borrowed);
++    aiython_in_hook = 1;
++    PyObject *result = PyObject_CallFunctionObjArgs(callback, frame_obj, name, value, NULL);
++    aiython_in_hook = 0;
++    Py_DECREF(frame_obj);
++    Py_DECREF(callback);
++    if (result == NULL) {
++        return -1;
++    }
++    Py_DECREF(result);
++    return 0;
++}
++
++static int
++aiython_mutation_hook_enabled(void)
++{
++    return PySys_GetObject("_aiython_before_mutation") != NULL;
++}
++
++static int
++aiython_store_hook_enabled(void)
++{
++    return PySys_GetObject("_aiython_before_store") != NULL;
++}
++
++static int
++aiython_before_mutation(_PyInterpreterFrame *frame, const char *kind,
++                        PyObject *owner, PyObject *key, PyObject *value)
++{
++    if (aiython_in_hook) {
++        return 0;
++    }
++    PyObject *callback = NULL;
++    int found = _PySys_GetOptionalAttrString("_aiython_before_mutation", &callback);
++    if (found <= 0) {
++        return found < 0 ? -1 : 0;
++    }
++    PyFrameObject *borrowed = _PyFrame_GetFrameObject(frame);
++    if (borrowed == NULL) {
++        Py_DECREF(callback);
++        return -1;
++    }
++    PyObject *kind_obj = PyUnicode_FromString(kind);
++    if (kind_obj == NULL) {
++        Py_DECREF(callback);
++        return -1;
++    }
++    PyObject *frame_obj = Py_NewRef(borrowed);
++    aiython_in_hook = 1;
++    PyObject *result = PyObject_CallFunctionObjArgs(
++        callback, frame_obj, kind_obj, owner, key, value, NULL);
++    aiython_in_hook = 0;
++    Py_DECREF(frame_obj);
++    Py_DECREF(kind_obj);
++    Py_DECREF(callback);
++    if (result == NULL) {
++        return -1;
++    }
++    Py_DECREF(result);
++    return 0;
++}
++
++static int
++aiython_function_event(_PyInterpreterFrame *frame, const char *attribute,
++                       PyObject *value)
++{
++    if (aiython_in_hook) {
++        return 0;
++    }
++    PyObject *callback = NULL;
++    int found = _PySys_GetOptionalAttrString(attribute, &callback);
++    if (found <= 0) {
++        return found < 0 ? -1 : 0;
++    }
++    PyFrameObject *borrowed = _PyFrame_GetFrameObject(frame);
++    if (borrowed == NULL) {
++        Py_DECREF(callback);
++        return -1;
++    }
++    PyObject *frame_obj = Py_NewRef(borrowed);
++    aiython_in_hook = 1;
++    PyObject *result = value == NULL
++        ? PyObject_CallOneArg(callback, frame_obj)
++        : PyObject_CallFunctionObjArgs(callback, frame_obj, value, NULL);
++    aiython_in_hook = 0;
++    Py_DECREF(frame_obj);
++    Py_DECREF(callback);
++    if (result == NULL) {
++        return -1;
++    }
++    Py_DECREF(result);
++    return 0;
++}
++
+ PyObject* _Py_HOT_FUNCTION DONT_SLP_VECTORIZE
+ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
+ {
+diff --git a/Python/generated_cases.c.h b/Python/generated_cases.c.h
+index 5cba25d..b9b7c86 100644
+--- a/Python/generated_cases.c.h
++++ b/Python/generated_cases.c.h
+@@ -366,6 +366,14 @@
+             {
+                 right = value;
+                 left = nos;
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                int store_hook_enabled = aiython_store_hook_enabled();
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (store_hook_enabled) {
++                    UPDATE_MISS_STATS(BINARY_OP);
++                    assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
++                    JUMP_TO_PREDICTED(BINARY_OP);
++                }
+                 PyObject *left_o = PyStackRef_AsPyObjectBorrow(left);
+                 assert(PyUnicode_CheckExact(left_o));
+                 assert(PyUnicode_CheckExact(PyStackRef_AsPyObjectBorrow(right)));
+@@ -7555,6 +7563,17 @@
+                     next_instr = frame->instr_ptr;
+                 }
+             }
++            // _AIYTHON_FUNCTION_ENTRY
++            {
++                if (oparg == 0) {
++                    _PyFrame_SetStackPointer(frame, stack_pointer);
++                    int err = aiython_function_event(frame, "_aiython_on_call", NULL);
++                    stack_pointer = _PyFrame_GetStackPointer(frame);
++                    if (err) {
++                        JUMP_TO_LABEL(error);
++                    }
++                }
++            }
+             DISPATCH();
+         }
+ 
+@@ -7587,6 +7606,18 @@
+             {
+                 retval = val;
+                 assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                int hook_err = aiython_function_event(frame, "_aiython_on_return",
++                    PyStackRef_AsPyObjectBorrow(retval));
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (hook_err < 0) {
++                    stack_pointer += -1;
++                    assert(WITHIN_STACK_BOUNDS());
++                    _PyFrame_SetStackPointer(frame, stack_pointer);
++                    PyStackRef_CLOSE(retval);
++                    stack_pointer = _PyFrame_GetStackPointer(frame);
++                    JUMP_TO_LABEL(error);
++                }
+                 _PyStackRef temp = PyStackRef_MakeHeapSafe(retval);
+                 stack_pointer += -1;
+                 assert(WITHIN_STACK_BOUNDS());
+@@ -10517,6 +10548,17 @@
+                     }
+                 }
+             }
++            // _AIYTHON_FUNCTION_ENTRY
++            {
++                if (oparg == 0) {
++                    _PyFrame_SetStackPointer(frame, stack_pointer);
++                    int err = aiython_function_event(frame, "_aiython_on_call", NULL);
++                    stack_pointer = _PyFrame_GetStackPointer(frame);
++                    if (err) {
++                        JUMP_TO_LABEL(error);
++                    }
++                }
++            }
+             DISPATCH();
+         }
+ 
+@@ -10555,6 +10597,14 @@
+                 JUMP_TO_PREDICTED(RESUME);
+             }
+             #endif
++            if (oparg == 0) {
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                int err = aiython_function_event(frame, "_aiython_on_call", NULL);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (err) {
++                    JUMP_TO_LABEL(error);
++                }
++            }
+             DISPATCH();
+         }
+ 
+@@ -10609,6 +10659,18 @@
+             _PyStackRef res;
+             retval = stack_pointer[-1];
+             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
++            _PyFrame_SetStackPointer(frame, stack_pointer);
++            int hook_err = aiython_function_event(frame, "_aiython_on_return",
++                PyStackRef_AsPyObjectBorrow(retval));
++            stack_pointer = _PyFrame_GetStackPointer(frame);
++            if (hook_err < 0) {
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(retval);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                JUMP_TO_LABEL(error);
++            }
+             _PyStackRef temp = PyStackRef_MakeHeapSafe(retval);
+             stack_pointer += -1;
+             assert(WITHIN_STACK_BOUNDS());
+@@ -10963,8 +11025,17 @@
+                 v = stack_pointer[-2];
+                 PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+                 _PyFrame_SetStackPointer(frame, stack_pointer);
+-                int err = PyObject_SetAttr(PyStackRef_AsPyObjectBorrow(owner),
++                int err = aiython_before_mutation(frame, "attr",
++                    PyStackRef_AsPyObjectBorrow(owner), name,
++                    PyStackRef_AsPyObjectBorrow(v));
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (err == 0) {
++                    _PyFrame_SetStackPointer(frame, stack_pointer);
++                    err = PyObject_SetAttr(PyStackRef_AsPyObjectBorrow(owner),
+                                        name, PyStackRef_AsPyObjectBorrow(v));
++                    stack_pointer = _PyFrame_GetStackPointer(frame);
++                }
++                _PyFrame_SetStackPointer(frame, stack_pointer);
+                 _PyStackRef tmp = owner;
+                 owner = PyStackRef_NULL;
+                 stack_pointer[-1] = owner;
+@@ -10997,6 +11068,17 @@
+             _PyStackRef owner;
+             _PyStackRef value;
+             /* Skip 1 cache entry */
++            // _AIYTHON_DEOPT_MUTATION
++            {
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                int hook_enabled = aiython_mutation_hook_enabled();
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (hook_enabled) {
++                    UPDATE_MISS_STATS(STORE_ATTR);
++                    assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
++                    JUMP_TO_PREDICTED(STORE_ATTR);
++                }
++            }
+             // _GUARD_TYPE_VERSION_AND_LOCK
+             {
+                 owner = stack_pointer[-1];
+@@ -11073,6 +11155,17 @@
+             _PyStackRef owner;
+             _PyStackRef value;
+             /* Skip 1 cache entry */
++            // _AIYTHON_DEOPT_MUTATION
++            {
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                int hook_enabled = aiython_mutation_hook_enabled();
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (hook_enabled) {
++                    UPDATE_MISS_STATS(STORE_ATTR);
++                    assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
++                    JUMP_TO_PREDICTED(STORE_ATTR);
++                }
++            }
+             // _GUARD_TYPE_VERSION
+             {
+                 owner = stack_pointer[-1];
+@@ -11124,6 +11217,17 @@
+             _PyStackRef owner;
+             _PyStackRef value;
+             /* Skip 1 cache entry */
++            // _AIYTHON_DEOPT_MUTATION
++            {
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                int hook_enabled = aiython_mutation_hook_enabled();
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (hook_enabled) {
++                    UPDATE_MISS_STATS(STORE_ATTR);
++                    assert(_PyOpcode_Deopt[opcode] == (STORE_ATTR));
++                    JUMP_TO_PREDICTED(STORE_ATTR);
++                }
++            }
+             // _GUARD_TYPE_VERSION
+             {
+                 owner = stack_pointer[-1];
+@@ -11218,6 +11322,18 @@
+             INSTRUCTION_STATS(STORE_DEREF);
+             _PyStackRef v;
+             v = stack_pointer[-1];
++            PyObject *name = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg);
++            _PyFrame_SetStackPointer(frame, stack_pointer);
++            int err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(v));
++            stack_pointer = _PyFrame_GetStackPointer(frame);
++            if (err < 0) {
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(v);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                JUMP_TO_LABEL(error);
++            }
+             PyCellObject *cell = (PyCellObject *)PyStackRef_AsPyObjectBorrow(GETLOCAL(oparg));
+             _PyFrame_SetStackPointer(frame, stack_pointer);
+             PyCell_SetTakeRef(cell, PyStackRef_AsPyObjectSteal(v));
+@@ -11241,6 +11357,18 @@
+                    ((_PyFrame_GetCode(frame)->co_flags & (CO_COROUTINE | CO_GENERATOR)) == 0) ||
+                    PyStackRef_IsHeapSafe(value)
+             );
++            PyObject *name = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg);
++            _PyFrame_SetStackPointer(frame, stack_pointer);
++            int err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(value));
++            stack_pointer = _PyFrame_GetStackPointer(frame);
++            if (err < 0) {
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(value);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                JUMP_TO_LABEL(error);
++            }
+             _PyStackRef tmp = GETLOCAL(oparg);
+             GETLOCAL(oparg) = value;
+             stack_pointer += -1;
+@@ -11268,6 +11396,18 @@
+             );
+             uint32_t oparg1 = oparg >> 4;
+             uint32_t oparg2 = oparg & 15;
++            PyObject *name = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg1);
++            _PyFrame_SetStackPointer(frame, stack_pointer);
++            int err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(value1));
++            stack_pointer = _PyFrame_GetStackPointer(frame);
++            if (err < 0) {
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(value1);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                JUMP_TO_LABEL(error);
++            }
+             _PyStackRef tmp = GETLOCAL(oparg1);
+             GETLOCAL(oparg1) = value1;
+             value2 = PyStackRef_DUP(GETLOCAL(oparg2));
+@@ -11300,13 +11440,40 @@
+             );
+             uint32_t oparg1 = oparg >> 4;
+             uint32_t oparg2 = oparg & 15;
++            PyObject *name1 = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg1);
++            PyObject *name2 = GETITEM(_PyFrame_GetCode(frame)->co_localsplusnames, oparg2);
++            _PyFrame_SetStackPointer(frame, stack_pointer);
++            int err = aiython_before_store(frame, name1, PyStackRef_AsPyObjectBorrow(value1));
++            stack_pointer = _PyFrame_GetStackPointer(frame);
++            if (err < 0) {
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(value1);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(value2);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                JUMP_TO_LABEL(error);
++            }
+             _PyStackRef tmp = GETLOCAL(oparg1);
+             GETLOCAL(oparg1) = value1;
+             stack_pointer += -1;
+             assert(WITHIN_STACK_BOUNDS());
+             _PyFrame_SetStackPointer(frame, stack_pointer);
+             PyStackRef_XCLOSE(tmp);
++            err = aiython_before_store(frame, name2, PyStackRef_AsPyObjectBorrow(value2));
+             stack_pointer = _PyFrame_GetStackPointer(frame);
++            if (err < 0) {
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(value2);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                JUMP_TO_LABEL(error);
++            }
+             tmp = GETLOCAL(oparg2);
+             GETLOCAL(oparg2) = value2;
+             stack_pointer += -1;
+@@ -11329,6 +11496,17 @@
+             v = stack_pointer[-1];
+             PyObject *name = GETITEM(FRAME_CO_NAMES, oparg);
+             _PyFrame_SetStackPointer(frame, stack_pointer);
++            int hook_err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(v));
++            stack_pointer = _PyFrame_GetStackPointer(frame);
++            if (hook_err < 0) {
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(v);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                JUMP_TO_LABEL(error);
++            }
++            _PyFrame_SetStackPointer(frame, stack_pointer);
+             int err = PyDict_SetItem(GLOBALS(), name, PyStackRef_AsPyObjectBorrow(v));
+             stack_pointer = _PyFrame_GetStackPointer(frame);
+             stack_pointer += -1;
+@@ -11367,6 +11545,17 @@
+                 stack_pointer = _PyFrame_GetStackPointer(frame);
+                 JUMP_TO_LABEL(error);
+             }
++            _PyFrame_SetStackPointer(frame, stack_pointer);
++            err = aiython_before_store(frame, name, PyStackRef_AsPyObjectBorrow(v));
++            stack_pointer = _PyFrame_GetStackPointer(frame);
++            if (err < 0) {
++                stack_pointer += -1;
++                assert(WITHIN_STACK_BOUNDS());
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                PyStackRef_CLOSE(v);
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                JUMP_TO_LABEL(error);
++            }
+             if (PyDict_CheckExact(ns)) {
+                 _PyFrame_SetStackPointer(frame, stack_pointer);
+                 err = PyDict_SetItem(ns, name, PyStackRef_AsPyObjectBorrow(v));
+@@ -11424,7 +11613,17 @@
+                     stack_pointer += -2;
+                     assert(WITHIN_STACK_BOUNDS());
+                     _PyFrame_SetStackPointer(frame, stack_pointer);
+-                    err = PyObject_SetItem(PyStackRef_AsPyObjectBorrow(container), slice, PyStackRef_AsPyObjectBorrow(v));
++                    err = aiython_before_mutation(frame, "item",
++                        PyStackRef_AsPyObjectBorrow(container), slice,
++                        PyStackRef_AsPyObjectBorrow(v));
++                    stack_pointer = _PyFrame_GetStackPointer(frame);
++                    if (err == 0) {
++                        _PyFrame_SetStackPointer(frame, stack_pointer);
++                        err = PyObject_SetItem(PyStackRef_AsPyObjectBorrow(container), slice,
++                            PyStackRef_AsPyObjectBorrow(v));
++                        stack_pointer = _PyFrame_GetStackPointer(frame);
++                    }
++                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                     Py_DECREF(slice);
+                     stack_pointer = _PyFrame_GetStackPointer(frame);
+                     stack_pointer += 2;
+@@ -11484,7 +11683,18 @@
+             {
+                 v = stack_pointer[-3];
+                 _PyFrame_SetStackPointer(frame, stack_pointer);
+-                int err = PyObject_SetItem(PyStackRef_AsPyObjectBorrow(container), PyStackRef_AsPyObjectBorrow(sub), PyStackRef_AsPyObjectBorrow(v));
++                int err = aiython_before_mutation(frame, "item",
++                    PyStackRef_AsPyObjectBorrow(container),
++                    PyStackRef_AsPyObjectBorrow(sub), PyStackRef_AsPyObjectBorrow(v));
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (err == 0) {
++                    _PyFrame_SetStackPointer(frame, stack_pointer);
++                    err = PyObject_SetItem(PyStackRef_AsPyObjectBorrow(container),
++                                       PyStackRef_AsPyObjectBorrow(sub),
++                                       PyStackRef_AsPyObjectBorrow(v));
++                    stack_pointer = _PyFrame_GetStackPointer(frame);
++                }
++                _PyFrame_SetStackPointer(frame, stack_pointer);
+                 _PyStackRef tmp = sub;
+                 sub = PyStackRef_NULL;
+                 stack_pointer[-1] = sub;
+@@ -11522,6 +11732,17 @@
+             _PyStackRef value;
+             _PyStackRef dict_st;
+             _PyStackRef sub;
++            // _AIYTHON_DEOPT_MUTATION
++            {
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                int hook_enabled = aiython_mutation_hook_enabled();
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (hook_enabled) {
++                    UPDATE_MISS_STATS(STORE_SUBSCR);
++                    assert(_PyOpcode_Deopt[opcode] == (STORE_SUBSCR));
++                    JUMP_TO_PREDICTED(STORE_SUBSCR);
++                }
++            }
+             // _GUARD_NOS_DICT
+             {
+                 nos = stack_pointer[-2];
+@@ -11573,6 +11794,17 @@
+             _PyStackRef nos;
+             _PyStackRef list_st;
+             _PyStackRef sub_st;
++            // _AIYTHON_DEOPT_MUTATION
++            {
++                _PyFrame_SetStackPointer(frame, stack_pointer);
++                int hook_enabled = aiython_mutation_hook_enabled();
++                stack_pointer = _PyFrame_GetStackPointer(frame);
++                if (hook_enabled) {
++                    UPDATE_MISS_STATS(STORE_SUBSCR);
++                    assert(_PyOpcode_Deopt[opcode] == (STORE_SUBSCR));
++                    JUMP_TO_PREDICTED(STORE_SUBSCR);
++                }
++            }
+             // _GUARD_TOS_INT
+             {
+                 value = stack_pointer[-1];

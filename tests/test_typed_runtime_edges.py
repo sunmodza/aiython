@@ -30,7 +30,7 @@ class TypeRuntimeEdgeTests(unittest.TestCase):
             __aiython_type_scope__ = Scope(declarations={'y': 'str'})
             globals()[SCOPE] = nonlocal_scope
             try:
-                scopes = TypeRuntime.scopes(inspect.currentframe())
+                scopes = self.runtime.scopes(inspect.currentframe())
                 self.assertEqual(len(scopes), 2)
             finally:
                 globals().pop(SCOPE)

@@ -82,6 +82,7 @@ class TypeRuntime:
         self._classes_lock = threading.RLock()
         self._contract_cache = threading.local()
         self._active_instance_checks = ContextVar('aiython_active_instance_checks', default=frozenset())
+        self._module_scopes = {}
         self.interactive_globals = None
         self.interactive_scope = None
 
@@ -273,6 +274,10 @@ class TypeRuntime:
                     namespace[parameter.__name__] = parameter
                     if parameter.__name__.startswith('__') and not parameter.__name__.endswith('__'):
                         namespace[f'_{owner.__name__.lstrip("_")}{parameter.__name__}'] = parameter
+        global_scope = self._module_scopes.get(id(frame.f_globals))
+        if global_scope is not None and global_scope[0] is frame.f_globals:
+            namespace.update({parameter.__name__: bound
+                              for parameter, bound in global_scope[1].bindings.items()})
         scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
         if isinstance(scope,Scope):
             namespace.update({parameter.__name__: bound for parameter,bound in scope.bindings.items()})
@@ -292,6 +297,11 @@ class TypeRuntime:
         if (frame.f_code.co_name == '<module>' and frame.f_globals is self.interactive_globals
                 and self.interactive_scope is not None):
             scope = self.interactive_scope
+            scope.declarations.update(declarations)
+        elif (frame.f_code.co_name == '<module>'
+              and (retained := self._module_scopes.get(id(frame.f_globals))) is not None
+              and retained[0] is frame.f_globals):
+            scope = retained[1]
             scope.declarations.update(declarations)
         else:
             scope = Scope(declarations=declarations, self_owner=owner)
@@ -316,6 +326,8 @@ class TypeRuntime:
         frame = inspect.currentframe().f_back
         try:
             scope = self._initialize(frame, declarations, parameters, returns)
+            if frame.f_code.co_name == '<module>':
+                self._module_scopes[id(frame.f_globals)] = (frame.f_globals, scope)
             _FRAME_SCOPES.set(_FRAME_SCOPES.get() + ((frame, scope),))
         finally:
             del frame
@@ -341,10 +353,12 @@ class TypeRuntime:
         finally:
             del frame
 
-    @staticmethod
-    def scopes(frame):
+    def scopes(self, frame):
         local = frame_scope(frame) or frame.f_locals.get(SCOPE)
         global_scope = frame.f_globals.get(SCOPE)
+        retained = self._module_scopes.get(id(frame.f_globals))
+        if retained is not None and retained[0] is frame.f_globals:
+            global_scope = retained[1]
         scopes = [(local,frame.f_locals)] if isinstance(local,Scope) else []
         if isinstance(global_scope,Scope) and global_scope is not local:
             scopes.append((global_scope,frame.f_globals))
@@ -569,33 +583,36 @@ class TypeRuntime:
                     except StopIteration as stop: return stop.value
         return checked()
 
+    def validate_attribute(self, frame, owner, name, value, annotation=None):
+        if annotation:
+            contract = compile_contract(annotation,self.namespace(frame))
+        else:
+            target = owner if issubclass(type(owner), type) else type(owner)
+            fields = {}
+            for base in reversed(target.__mro__):
+                fields.update(annotations_of(base))
+            source = fields.get(name)
+            contract = None
+            if source:
+                scope = self.namespace(frame)
+                if not descriptor_field(target, name, source, scope):
+                    namespace = Compiler.module_names(target, scope)
+                    namespace[SELF_OWNER] = target
+                    namespace.update({p.__name__:p for p in class_parameters(target)})
+                    contract = compile_contract(source,namespace)
+        if contract:
+            if contract.marker == 'ClassVar' and not issubclass(type(owner), type):
+                raise TypeViolation(f'{name}: ClassVar must be assigned on the class')
+            if contract.marker == 'Final':
+                try: inspect.getattr_static(owner,name)
+                except AttributeError: pass
+                else: raise TypeViolation(f'{name}: Final attribute cannot be reassigned')
+            contract.validate(value,f'{type(owner).__name__}.{name}')
+
     def assign_attribute(self,owner,name,value,annotation=None):
         frame = inspect.currentframe().f_back
         try:
-            if annotation:
-                contract = compile_contract(annotation,self.namespace(frame))
-            else:
-                target = owner if issubclass(type(owner), type) else type(owner)
-                fields = {}
-                for base in reversed(target.__mro__):
-                    fields.update(annotations_of(base))
-                source = fields.get(name)
-                contract = None
-                if source:
-                    scope = self.namespace(frame)
-                    if not descriptor_field(target, name, source, scope):
-                        namespace = Compiler.module_names(target, scope)
-                        namespace[SELF_OWNER] = target
-                        namespace.update({p.__name__:p for p in class_parameters(target)})
-                        contract = compile_contract(source,namespace)
-            if contract:
-                if contract.marker == 'ClassVar' and not issubclass(type(owner), type):
-                    raise TypeViolation(f'{name}: ClassVar must be assigned on the class')
-                if contract.marker == 'Final':
-                    try: inspect.getattr_static(owner,name)
-                    except AttributeError: pass
-                    else: raise TypeViolation(f'{name}: Final attribute cannot be reassigned')
-                contract.validate(value,f'{type(owner).__name__}.{name}')
+            self.validate_attribute(frame, owner, name, value, annotation)
             setattr(owner,name,value)
             if issubclass(type(owner), type):
                 member = type.__getattribute__(owner, '__dict__').get(name)

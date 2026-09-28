@@ -23,6 +23,98 @@ from aiython.stats import CURRENT_STATS, InvocationStats
 
 
 class OverheadTests(unittest.TestCase):
+    def test_plain_source_uses_cpython_code_object(self):
+        source = ('def values():\n'
+                  '    yield from (1, 2)\n'
+                  'result = list(values())\n')
+        filename = '<plain-native-source>'
+        runtime = Runtime(ResolvedConfig(None, Path.cwd()), stats=True)
+        try:
+            with patch.object(runtime.bridge, 'prepare_unit',
+                              wraps=runtime.bridge.prepare_unit) as prepare:
+                code = runtime.compile_source(source, filename, entry=True)
+            prepare.assert_called_once()
+            self.assertEqual(code, compile(source, filename, 'exec', dont_inherit=True))
+            self.assertIs(code, runtime.compile_source(source, filename, entry=True))
+            self.assertEqual(runtime.stats.preparation_cache_hits, 1)
+            namespace = {}
+            exec(code, namespace)
+            self.assertEqual(namespace['result'], [1, 2])
+            self.assertFalse(runtime.checkpoints)
+        finally:
+            runtime.capabilities.close()
+
+    def test_native_cache_stops_after_typed_class_registration(self):
+        source = 'value = 1\n'
+        filename = '<typed-class-cache>'
+        runtime = Runtime(ResolvedConfig(None, Path.cwd()))
+        try:
+            native = runtime.compile_source(source, filename, entry=True)
+            class Box:
+                value: int
+            runtime.types.register_class(Box)
+            checked = runtime.compile_source(source, filename, entry=True)
+            self.assertEqual(native, compile(source, filename, 'exec', dont_inherit=True))
+            self.assertNotEqual(checked, native)
+        finally:
+            runtime.capabilities.close()
+
+    def test_reused_module_namespace_retains_global_contract(self):
+        runtime = Runtime(ResolvedConfig(None, Path.cwd()))
+        namespace = {}
+        try:
+            exec(runtime.compile_source('value: int = 1\n', '<first-exec>'), namespace)
+            source = 'value = "invalid"\n'
+            code = runtime.compile_source(source, '<second-exec>')
+            self.assertNotEqual(code, compile(source, '<second-exec>', 'exec', dont_inherit=True))
+            with self.assertRaises(TypeViolation):
+                exec(code, namespace)
+            self.assertEqual(namespace['value'], 1)
+        finally:
+            runtime.capabilities.close()
+
+    def test_preparation_cache_separates_configured_recovery(self):
+        filename = '<recovery-cache>'
+        source = '1 / 0\n'
+        profile = ProfileConfig('default', 'fake', 'fake')
+        configured = Runtime(ResolvedConfig(None, Path.cwd(), 'default',
+                                             {'default': profile}))
+        unconfigured = Runtime(ResolvedConfig(None, Path.cwd()))
+        try:
+            configured.compile_source(source, filename, entry=True)
+            unconfigured.compile_source(source, filename, entry=True)
+            self.assertTrue(configured.checkpoints)
+            self.assertFalse(unconfigured.checkpoints)
+        finally:
+            configured.capabilities.close()
+            unconfigured.capabilities.close()
+
+    def test_preparation_preserves_native_source_tree_and_type_checks(self):
+        source = 'value: int = 1\nvalue = "bad"\n'
+        filename = '<native-source-tree>'
+        config = ResolvedConfig(None, Path.cwd())
+        runtime = Runtime(config)
+        try:
+            code = runtime.compile_source(source, filename, entry=True)
+            original = compile(source, filename, 'exec', dont_inherit=True)
+            unit = runtime.units[filename]
+            self.assertEqual(compile(unit.tree, filename, 'exec', dont_inherit=True), original)
+            self.assertNotEqual(code, original)
+            with self.assertRaises(TypeViolation):
+                exec(code, {})
+        finally:
+            runtime.capabilities.close()
+        cached_runtime = Runtime(config, stats=True)
+        try:
+            cached_code = cached_runtime.compile_source(source, filename, entry=True)
+            self.assertEqual(cached_runtime.stats.preparation_cache_hits, 1)
+            self.assertEqual(compile(cached_runtime.units[filename].tree, filename, 'exec',
+                                     dont_inherit=True), original)
+            with self.assertRaises(TypeViolation):
+                exec(cached_code, {})
+        finally:
+            cached_runtime.capabilities.close()
+
     def test_primitive_containers_keep_strict_types_and_error_paths(self):
         for annotation, good, bad, path in [
             ('list[int]', [1, 2], [1, True], 'value[1]'),

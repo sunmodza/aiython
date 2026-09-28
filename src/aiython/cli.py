@@ -315,7 +315,18 @@ def run_script(path: Path, arguments=(), *, config=None, agent_factory=None, sta
                       'Type "help", "copyright", "credits" or "license" for more information.')
             AiythonConsole(runtime, module.__dict__).interact(banner=banner, exitmsg='')
         else:
-            exec(code, module.__dict__)
+            try:
+                exec(code, module.__dict__)
+            except Exception as exc:
+                if not restore_state and not config.profiles and not isinstance(exc, AiythonError):
+                    trace = exc.__traceback__
+                    while trace is not None and trace.tb_frame.f_code.co_filename != code.co_filename:
+                        trace = trace.tb_next
+                    if trace is not None:
+                        exc.__traceback__ = trace
+                        sys.excepthook(type(exc), exc, trace)
+                        raise SystemExit(1) from None
+                raise
         return module.__dict__
     finally:
         if restore_state:
@@ -600,7 +611,7 @@ def main(argv=None):
                         str(path if module_spec else path.resolve()))
             unit = parse(read_source(path.resolve()) if source is None else source, filename)
             runtime = Runtime(config)
-            runtime.prepare(unit, entry=True)
+            runtime.bridge.prepare_unit(unit, entry=True, recovery_metadata=True)
             print(json.dumps({"config": describe(config), "blocks": [
                 {"statement": b.statement, "span": vars(b.span), "expression": b.expression, "output_type": b.output_type,
                  "plan": "requires runtime intent resolution", "cache": "unknown", "cost": "unknown",

@@ -20,9 +20,81 @@ from aiython.cli import ModuleStartFinder, main, module_details, module_source, 
 from aiython.config import resolve
 from aiython.models import AiythonError, ProfileConfig, ResolvedConfig
 from aiython.runtime import Runtime
+from aiython.type_constraints import TypeViolation
 
 
 class PythonCompatibilityTests(unittest.TestCase):
+    def test_plain_entry_preserves_annotated_project_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name = 'mixed_native_helper_for_aiython'
+            (root / 'main.py').write_text(f'import {name}\n{name}.change()\n')
+            (root / f'{name}.py').write_text('value: int = 1\n'
+                                             'def change():\n'
+                                             '    global value\n'
+                                             '    value = "invalid"\n')
+            runtime = Runtime(ResolvedConfig(None, root))
+            previous = sys.modules.pop(name, None)
+            try:
+                with self.assertRaises(TypeViolation):
+                    run_script(root / 'main.py', config=runtime.config, runtime=runtime)
+                self.assertFalse(any(key.startswith(str(root / 'main.py') + ':')
+                                     for key in runtime.checkpoints))
+            finally:
+                sys.modules.pop(name, None)
+                if previous is not None:
+                    sys.modules[name] = previous
+
+    def test_plain_entry_rechecks_mutated_imported_typed_instance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            name = 'mixed_typed_instance_for_aiython'
+            (root / f'{name}.py').write_text('class Box:\n'
+                                             '    values: list[int]\n'
+                                             '    def __init__(self):\n'
+                                             '        self.values = [1]\n')
+            previous = sys.modules.pop(name, None)
+            try:
+                for import_source in (f'import {name}\nmodule = {name}\n',
+                                      f'module = __import__("{name}")\n',
+                                      f'importer = getattr(__builtins__, "__import__")\n'
+                                      f'module = importer("{name}")\n'):
+                    with self.subTest(import_source=import_source):
+                        sys.modules.pop(name, None)
+                        (root / 'main.py').write_text(import_source +
+                                                      'box = module.Box()\n'
+                                                      'box.values.append("invalid")\n')
+                        with self.assertRaises(TypeViolation):
+                            run_script(root / 'main.py', config=ResolvedConfig(None, root))
+            finally:
+                sys.modules.pop(name, None)
+                if previous is not None:
+                    sys.modules[name] = previous
+
+    def test_unconfigured_program_raises_original_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / 'main.py'
+            script.write_text('1 / 0\n')
+            config = ResolvedConfig(None, root)
+            runtime = Runtime(config)
+            with self.assertRaises(ZeroDivisionError):
+                run_script(script, config=config, runtime=runtime)
+            self.assertFalse(runtime.checkpoints)
+            result = subprocess.run([sys.executable, '-m', 'aiython', str(script)],
+                                    cwd=root, capture_output=True, text=True, timeout=10)
+            native = subprocess.run([sys.executable, str(script)], cwd=root,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual((result.returncode, result.stdout, result.stderr),
+                             (native.returncode, native.stdout, native.stderr))
+            command = subprocess.run([sys.executable, '-m', 'aiython', '-c', '1/0'],
+                                     cwd=root, capture_output=True, text=True, timeout=10)
+            native_command = subprocess.run([sys.executable, '-c', '1/0'],
+                                            cwd=root, capture_output=True, text=True, timeout=10)
+            self.assertEqual((command.returncode, command.stdout, command.stderr),
+                             (native_command.returncode, native_command.stdout,
+                              native_command.stderr))
+
     def test_module_resolution_errors_are_explicit(self):
         with self.assertRaisesRegex(AiythonError, 'Relative module names not supported'):
             module_details('.relative')
