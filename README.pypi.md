@@ -2,9 +2,15 @@
 
 **When Python doesn’t know what to do, Aiython does.**
 
-Aiython runs Python normally and can bring in AI when Python cannot parse the source or continue execution. AI works with the live program state; Python keeps control of execution.
+**Run an existing Python script by replacing the command:**
 
-[Read the documentation](https://sunmodza.github.io/aiython-docs/).
+```text
+python app.py  →  aiython app.py
+```
+
+The same works for modules: `python -m package` → `aiython -m package`. Your script and its arguments stay the same. Aiython checks declared types and can call AI for inline requests or eligible errors.
+
+## Example
 
 ```python
 from typing import Literal
@@ -23,34 +29,20 @@ summary = summarize the routed tickets in one sentence
 print(queues, summary)
 ```
 
-Save this as `tickets.py` and run it with `aiython`; AI classifies each ticket, then summarizes the completed queues once.
+Python runs the loop and updates `queues`. Aiython handles the inline requests using live program state and checks the declared `Literal` result.
 
-## Install and run
+## Try it
 
-Use CPython 3.11 or newer. For a project managed by [uv](https://docs.astral.sh/uv/):
+Save the example as `tickets.py`:
 
 ```bash
-uv add aiython
-uv run aiython setup
-uv run aiython --explain tickets.py
-uv run aiython tickets.py
+pip install aiython
+aiython setup
+aiython tickets.py
 ```
 
-For an activated virtual environment, use `python -m pip install aiython` or `uv pip install aiython`, then run `aiython setup` and `aiython tickets.py`. For a standalone CLI, use `uv tool install aiython`; this gives you the `aiython` command in an isolated environment. Install Aiython in the project environment when your script imports other project dependencies.
+Preview AI calls without running the script: `aiython --explain tickets.py`.
 
-`--explain` shows where AI is invoked without executing the script or calling a model. `setup` creates or updates project configuration, lets you choose a tool-capable model, and stores an entered key in a private, gitignored project file. Running the final command uses your chosen provider and may incur charges.
+[Documentation](https://sunmodza.github.io/aiython-docs/) · [Examples](https://sunmodza.github.io/aiython-docs/examples/) · [Installation](https://sunmodza.github.io/aiython-docs/getting-started/)
 
-The PyPI distribution, CLI, and Python import are all named **`aiython`**.
-
-## What stays in Python
-
-Python owns statement order, loops, assignments, and side effects. AI works at the current execution boundary, with access to live objects and checks on declared result types. Ordinary Python code runs without loading LiteLLM or contacting a provider.
-
-Use `aiython --help` to see the CLI, `aiython config show` to inspect configuration, and `aiython --stats tickets.py` to see model calls and timings. Additional routes for vision, documents, embeddings, reranking, speech, images, and video are configured only when needed.
-
-Run an importable module or package with `aiython -m package.module` or `aiython -m package`; pass its arguments after the module name.
-The CLI also accepts `aiython -c 'print(1)'`, `aiython -` for stdin, and a directory or zipapp with `__main__.py`.
-
-Aiython is not a sandbox. Frame tools can use `eval` and `exec` with your process permissions, and relevant source or object data may be sent to your configured provider. Use trusted code and review provider data handling.
-
-Licensed under MIT.
+Aiython is not a sandbox: AI tools run with your process permissions, and relevant code or data may be sent to your provider. MIT licensed.
