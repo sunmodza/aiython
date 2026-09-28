@@ -620,10 +620,15 @@ print(initial_main is sys.modules['__main__'], 'from_init' in globals().get('__a
     def test_console_entry_point_finds_current_directory_modules(self):
         console = Path(sys.executable).with_name('aiython')
         self.assertTrue(console.is_file())
+        # A uv environment may invoke the test suite through python3 while
+        # the generated console script's shebang uses python. Compare two
+        # processes started with the same interpreter path.
+        with console.open('rb') as script:
+            console_python = script.readline().decode().removeprefix('#!').strip()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'localmodule.py').write_text('import sys\nprint(sys.argv, sys.orig_argv, sys.path[0])\n')
-            python = subprocess.run([sys.executable, '-m', 'localmodule', 'arg'], cwd=root,
+            python = subprocess.run([console_python, '-m', 'localmodule', 'arg'], cwd=root,
                                     capture_output=True, text=True)
             aiython = subprocess.run([str(console), '-m', 'localmodule', 'arg'], cwd=root,
                                      capture_output=True, text=True)

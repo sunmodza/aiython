@@ -25,6 +25,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           version: latest-known
           enable-cache: false
+      - name: Prepare offline project credentials
+        run: |
+          mkdir -p .aiython
+          printf 'OPENROUTER_API_KEY=offline-test\n' > .aiython/credentials.env
       - name: Check CPython frontend code objects
         run: uv run --locked --python ${{ matrix.python-version }} python benchmarks/stdlib_syntax.py
       - name: Test with line and branch coverage
