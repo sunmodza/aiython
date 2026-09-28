@@ -38,8 +38,9 @@ why, and how you tested it. Update a relevant guide or example when behavior
 changes. Keep Python in charge of execution order and side effects, and keep
 code and documentation in English.
 
-`main` accepts changes through pull requests. CI checks the package, docs,
-Python 3.11–3.14, and patched CPython hooks before a merge. The release workflow
-publishes PyPI and the documentation site from version tags.
+`main` accepts changes through pull requests. For documentation-only changes,
+CI checks the docs and skips the package, Python, and patched CPython tests.
+Code and workflow changes run the full suite on Python 3.11–3.14. The release
+workflow publishes PyPI and the documentation site from version tags.
 
 Contributions are licensed under the [MIT license](LICENSE).
