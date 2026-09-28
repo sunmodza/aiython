@@ -9,7 +9,25 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check changed files
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 scripts/ci_docs_only.py
+
   package:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,6 +44,8 @@ jobs:
           test "$(cd /tmp && /tmp/aiython-wheel-smoke/bin/aiython /tmp/aiython-wheel-smoke/plain.py)" = 2
 
   test:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -62,6 +82,8 @@ jobs:
           if-no-files-found: warn
 
   native-hooks:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -100,16 +122,25 @@ jobs:
   required:
     name: CI
     if: ${{ always() }}
-    needs: [package, test, native-hooks, docs]
+    needs: [changes, package, test, native-hooks, docs]
     runs-on: ubuntu-latest
     steps:
-      - name: Require every job to pass
+      - name: Require the right jobs to pass
         env:
+          CHANGES: ${{ needs.changes.result }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
           PACKAGE: ${{ needs.package.result }}
           TEST: ${{ needs.test.result }}
           NATIVE_HOOKS: ${{ needs.native-hooks.result }}
           DOCS: ${{ needs.docs.result }}
         run: |
-          for result in "$PACKAGE" "$TEST" "$NATIVE_HOOKS" "$DOCS"; do
-            test "$result" = success || exit 1
+          test "$CHANGES" = success
+          test "$DOCS" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            expected=skipped
+          else
+            expected=success
+          fi
+          for result in "$PACKAGE" "$TEST" "$NATIVE_HOOKS"; do
+            test "$result" = "$expected" || exit 1
           done
