@@ -38,7 +38,9 @@ Python program.
 
 ## Quick start
 
-Install Aiython with [`uv`](https://docs.astral.sh/uv/):
+### 1. Install
+
+With `uv`:
 
 ```bash
 uv tool install aiython
@@ -50,24 +52,32 @@ Or with `pip`:
 pip install aiython
 ```
 
-Set up your AI provider:
+### 2. Set up your AI provider
 
 ```bash
 aiython setup
 ```
 
-Then run an existing Python script by replacing the command:
+### 3. Run your Python script with Aiython
 
-```text
-python app.py  →  aiython app.py
+Replace:
+
+```bash
+python app.py
 ```
 
-Your script and its arguments stay the same.
+with:
 
-Modules work too:
+```bash
+aiython app.py
+```
 
-```text
-python -m package  →  aiython -m package
+Modules work the same way:
+
+```bash
+python -m package
+# becomes
+aiython -m package
 ```
 
 ## Example
