@@ -1,4 +1,5 @@
 """Exercise Aiython's experimental type bridge on patched CPython."""
+import asyncio
 import sys
 
 from aiython.native_bridge import NativeTypeBridge
@@ -6,7 +7,9 @@ from aiython.type_constraints import TypeViolation
 
 
 SOURCE = '''
-from typing import Final, Generator
+from typing import AsyncGenerator, Final, Generator
+
+yield_cleanup = []
 
 answer: int = 1
 fixed: Final[int] = 1
@@ -85,6 +88,18 @@ def generator() -> Generator[int, None, None]:
 def generator_error() -> Generator[int, None, int]:
     yield 1
     return "invalid"
+
+def yield_error() -> Generator[int, None, None]:
+    try:
+        yield "invalid"
+    finally:
+        yield_cleanup.append("closed")
+
+def yield_from_error() -> Generator[int, None, None]:
+    yield from (1, "invalid")
+
+async def async_yield_error() -> AsyncGenerator[int, None]:
+    yield "invalid"
 '''
 
 
@@ -119,6 +134,16 @@ def main():
         rejected(namespace['make_final_setter']())
         assert list(namespace['generator']()) == [1]
         rejected(lambda: list(namespace['generator_error']()))
+        if hasattr(sys, 'monitoring'):
+            rejected(lambda: list(namespace['yield_error']()))
+            assert namespace['yield_cleanup'] == ['closed']
+            rejected(lambda: list(namespace['yield_from_error']()))
+
+            async def consume_async():
+                async for _ in namespace['async_yield_error']():
+                    pass
+
+            rejected(lambda: asyncio.run(consume_async()))
         rejected(namespace['local_error'])
         rejected(namespace['local_final'])
         rejected(lambda: namespace['parameter_reassignment'](1))

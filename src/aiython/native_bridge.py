@@ -219,6 +219,42 @@ class NativeTypeBridge:
                 contract = contract.args[2]
             contract.validate(value, 'return')
 
+    def on_yield(self, code, offset, value):
+        """Validate the value before CPython exposes it to the generator caller."""
+        frame = inspect.currentframe().f_back
+        try:
+            info = self._frame_types(frame)
+            if info is None or not info.returns:
+                return
+            contract = self.types.contract(info.returns, self.types.namespace(frame))
+            if contract.kind not in ('generator', 'async_generator'):
+                raise TypeViolation('Generator return annotation must describe yielded values')
+            contract.args[0].validate(value, 'yield')
+        finally:
+            del frame
+
+    @contextmanager
+    def _yield_monitor(self):
+        monitoring = getattr(sys, 'monitoring', None)
+        if monitoring is None or not hasattr(monitoring.events, 'PY_YIELD'):
+            yield
+            return
+        tool = next((number for number in reversed(range(6))
+                     if monitoring.get_tool(number) is None), None)
+        if tool is None:
+            raise RuntimeError('No free sys.monitoring tool ID for typed yields')
+        monitoring.use_tool_id(tool, 'aiython-native-yield')
+        try:
+            monitoring.register_callback(tool, monitoring.events.PY_YIELD, self.on_yield)
+            monitoring.set_events(tool, monitoring.events.PY_YIELD)
+            try:
+                yield
+            finally:
+                monitoring.set_events(tool, 0)
+                monitoring.register_callback(tool, monitoring.events.PY_YIELD, None)
+        finally:
+            monitoring.free_tool_id(tool)
+
     @contextmanager
     def installed(self):
         """Install callbacks for a scoped experiment, restoring prior hooks."""
@@ -243,7 +279,8 @@ class NativeTypeBridge:
                 sys._aiython_before_store = self.before_store
             if not observed:
                 raise RuntimeError('NativeTypeBridge requires a CPython build with Aiython VM hooks')
-            yield self
+            with self._yield_monitor():
+                yield self
         finally:
             for name, value in previous.items():
                 if value is missing:

@@ -29,6 +29,13 @@ is outside the function's source-level `try` range in some cases, so an inner
 `except` will not necessarily catch it. This remains an unresolved semantic
 gap.
 
+On Python 3.12–3.14, the standalone bridge also installs a scoped
+`sys.monitoring.PY_YIELD` callback. It validates values from `yield`,
+`yield from`, and async generators before they reach the caller. A validation
+error follows CPython's normal exception path, including generator `finally`
+blocks. Python 3.11 has no `sys.monitoring`, so typed yields there continue
+through the managed bridge's boundary compiler.
+
 The automated builder verifies the unmodified CPython baseline, applies the
 matching patch, builds again, runs the VM hook smoke test, and runs eight
 CPython test modules. It also runs `native/tests/typed_bridge.py`, which
@@ -70,7 +77,8 @@ and the four pinned patched interpreters.
 The standalone experimental `NativeTypeBridge.compile_source` and `installed`
 API parses annotations, compiles the original source, and validates annotated
 parameters, generator returns, local/global/nonlocal assignments, `Final`
-rebinding, and class attributes through the VM hooks. It does not yet check
-yielded values, deletions, in-place mutation through method calls, generic
-bindings, or provide AI recovery through VM callbacks. These results do not
-establish full Python compatibility.
+rebinding, and class attributes through the VM hooks. On Python 3.12–3.14 it
+also validates yielded values through `sys.monitoring`. It does not yet check
+yielded values on Python 3.11, deletions, in-place mutation through method
+calls, generic bindings, or provide AI recovery through VM callbacks. These
+results do not establish full Python compatibility.
