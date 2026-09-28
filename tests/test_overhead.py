@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 from aiython.capabilities import Store, CapabilityResult, Embeddings
 from aiython.cli import run_script
 from aiython.models import ProfileConfig, ResolvedConfig
+from aiython.native_bridge import vm_available
 from aiython.providers import LiteLLMProvider
 from aiython.runtime import Runtime
 from aiython.type_constraints import ContractCache, TypeViolation, compile_contract
@@ -99,7 +100,8 @@ class OverheadTests(unittest.TestCase):
             original = compile(source, filename, 'exec', dont_inherit=True)
             unit = runtime.units[filename]
             self.assertEqual(compile(unit.tree, filename, 'exec', dont_inherit=True), original)
-            self.assertNotEqual(code, original)
+            self.assertEqual(code == original, vm_available())
+            self.assertEqual(runtime.bridge.uses_vm(code), vm_available())
             with self.assertRaises(TypeViolation):
                 exec(code, {})
         finally:
@@ -107,7 +109,8 @@ class OverheadTests(unittest.TestCase):
         cached_runtime = Runtime(config, stats=True)
         try:
             cached_code = cached_runtime.compile_source(source, filename, entry=True)
-            self.assertEqual(cached_runtime.stats.preparation_cache_hits, 1)
+            self.assertEqual(cached_runtime.stats.preparation_cache_hits,
+                             0 if vm_available() else 1)
             self.assertEqual(compile(cached_runtime.units[filename].tree, filename, 'exec',
                                      dont_inherit=True), original)
             with self.assertRaises(TypeViolation):

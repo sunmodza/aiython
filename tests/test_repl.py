@@ -5,6 +5,7 @@ import contextlib
 import io
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from aiython.models import ProfileConfig, ResolvedConfig
 from aiython.repl import AiythonConsole
@@ -13,6 +14,48 @@ from aiython.typed_runtime import Scope
 
 
 class InteractiveConsoleTests(unittest.TestCase):
+    def test_syntax_and_setup_errors_are_reported_without_advancing_cell(self):
+        with patch.object(self.console, 'compile', side_effect=SyntaxError('bad syntax')):
+            with patch.object(self.console, 'showsyntaxerror') as report:
+                self.assertFalse(self.console.runsource('value = 1'))
+                report.assert_called_once_with('<stdin:1>')
+        with patch.object(self.console, 'compile', side_effect=SyntaxError('bad AI')):
+            with patch('aiython.repl.parse', side_effect=SyntaxError('bad AI')):
+                with patch.object(self.console, 'showsyntaxerror') as report:
+                    self.assertFalse(self.console.runsource('choose'))
+                    report.assert_called_once_with('<stdin:1>')
+        with patch.object(self.console, 'compile', side_effect=SyntaxError('bad AI')):
+            with patch('aiython.repl.parse', side_effect=RuntimeError('parser failed')):
+                with patch.object(self.console, 'showtraceback') as report:
+                    self.assertFalse(self.console.runsource('choose'))
+                    report.assert_called_once_with()
+        with patch.object(self.console, 'compile', side_effect=SyntaxError('bad AI')):
+            with patch('aiython.repl.parse', side_effect=SystemExit(3)):
+                with self.assertRaises(SystemExit):
+                    self.console.runsource('choose')
+        for error, reporter in ((SyntaxError('bad transform'), 'showsyntaxerror'),
+                                (RuntimeError('compiler failed'), 'showtraceback')):
+            with self.subTest(error=error):
+                with patch.object(self.runtime.bridge, 'prepare_unit', side_effect=error):
+                    with patch.object(self.console, reporter) as report:
+                        self.assertFalse(self.console.runsource('1 + 2'))
+                        if reporter == 'showsyntaxerror':
+                            report.assert_called_once_with('<stdin:1>')
+                        else:
+                            report.assert_called_once_with()
+        with patch.object(self.runtime.bridge, 'prepare_unit', side_effect=SystemExit(4)):
+            with self.assertRaises(SystemExit):
+                self.console.runsource('1 + 2')
+        self.assertEqual(self.console.cell_number, 0)
+
+    def test_native_compiled_cell_runs_without_runtime_binding(self):
+        code = compile('answer = 3', '<stdin:1>', 'exec')
+        with patch.object(self.runtime.bridge, 'prepare_unit', return_value=(code, True)):
+            with patch('aiython.repl.bind_runtime') as bind:
+                self.assertFalse(self.console.runsource('answer = 3'))
+                bind.assert_not_called()
+        self.assertEqual(self.namespace['answer'], 3)
+
     def setUp(self):
         self.had_underscore = '_' in vars(builtins)
         self.original_underscore = vars(builtins).get('_')

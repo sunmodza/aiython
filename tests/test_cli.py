@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,11 +18,163 @@ from prompt_toolkit.document import Document
 
 from aiython.config import CAPABILITIES, credential, resolve
 from aiython.cli import main, run_repl, run_script
+from aiython import cli
 from aiython.models import ConfigError
 from aiython.setup import ModelChoice, _catalog, _choose_model, setup
 
 
 class CLITests(unittest.TestCase):
+    def test_module_source_restores_parent_attribute_after_static_import(self):
+        parent = types.ModuleType('temporary_parent')
+        child = types.ModuleType('temporary_parent.child')
+        secondary_parent = types.ModuleType('temporary_secondary_parent')
+        secondary_child = types.ModuleType('temporary_secondary_parent.child')
+        secondary_parent.child = secondary_child
+        previous = object()
+        parent.child = previous
+        finder = types.SimpleNamespace(static_modules=[
+            (secondary_child, secondary_parent, 'child', False, None),
+            (child, parent, 'child', True, previous)])
+
+        def details(name):
+            parent.child = child
+            sys.modules[child.__name__] = child
+            return types.SimpleNamespace(name=name, origin='<module>', loader=None), 'pass', None
+
+        try:
+            with patch.object(cli, 'ModuleStartFinder', return_value=finder), \
+                    patch.object(cli, 'module_details', side_effect=details):
+                cli.module_source(child.__name__, runtime=object())
+            self.assertIs(parent.child, previous)
+            self.assertNotIn(child.__name__, sys.modules)
+            self.assertFalse(hasattr(secondary_parent, 'child'))
+        finally:
+            sys.modules.pop(child.__name__, None)
+
+    def test_repl_startup_reports_open_compile_and_execution_errors(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            startup = Path(directory) / 'startup.py'
+            startup.write_text('answer = 1\n')
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(Path(directory) / 'missing.py')}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                run_repl(restore_state=True)
+            self.assertIn('Could not open PYTHONSTARTUP', errors.getvalue())
+
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    patch('aiython.cli.Runtime.compile_source', side_effect=SyntaxError('bad startup')), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                run_repl(restore_state=True)
+            self.assertIn('SyntaxError', errors.getvalue())
+
+            errors = io.StringIO()
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    patch('aiython.repl.AiythonConsole.runcode', side_effect=RuntimeError('startup failed')), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors):
+                run_repl(restore_state=True)
+            self.assertIn('startup failed', errors.getvalue())
+            with patch.dict(os.environ, {'PYTHONSTARTUP': str(startup)}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    patch('aiython.repl.AiythonConsole.runcode', side_effect=SystemExit(4)):
+                with self.assertRaises(SystemExit):
+                    run_repl(restore_state=True)
+
+    def test_existing_interactive_host_state_is_restored(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        sentinel = object()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'script.py'
+            path.write_text('answer = 1\n')
+            with patch.dict(vars(builtins), {'_': sentinel}), \
+                    patch.dict(vars(sys), {'last_type': sentinel, 'last_value': sentinel,
+                                           'last_exc': sentinel, 'last_traceback': sentinel}), \
+                    patch.object(sys, 'stdin', Terminal()), \
+                    patch('aiython.repl.AiythonConsole.interact'):
+                run_script(path, interactive=True)
+                self.assertIs(builtins._, sentinel)
+                self.assertTrue(all(getattr(sys, name) is sentinel for name in
+                                    ('last_type', 'last_value', 'last_exc', 'last_traceback')))
+                run_repl(restore_state=True)
+                self.assertIs(builtins._, sentinel)
+                self.assertTrue(all(getattr(sys, name) is sentinel for name in
+                                    ('last_type', 'last_value', 'last_exc', 'last_traceback')))
+
+    def test_explain_requires_input_and_module_syntax_error_keeps_origin(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        with patch.object(sys, 'stdin', Terminal()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main(['--explain'])
+        with patch.object(cli, 'module_source', side_effect=SyntaxError('missing filename')):
+            with self.assertRaisesRegex(SyntaxError, 'missing filename'):
+                main(['-m', 'missing_module'])
+
+    def test_nonembedded_repl_finishes_at_process_exit(self):
+        source = ('from unittest.mock import patch\n'
+                  'from aiython.cli import run_repl\n'
+                  "with patch('aiython.repl.AiythonConsole.interact'):\n"
+                  '    run_repl()\n')
+        result = subprocess.run([sys.executable, '-c', source],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_repl_safe_path_and_missing_host_main_restore(self):
+        source = ('import sys\n'
+                  'from unittest.mock import patch\n'
+                  'from aiython.cli import run_repl\n'
+                  "sys.modules.pop('__main__', None)\n"
+                  "with patch('aiython.repl.AiythonConsole.interact'):\n"
+                  '    run_repl(restore_state=True)\n')
+        result = subprocess.run([sys.executable, '-P', '-c', source],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_interactive_error_on_legacy_version_skips_last_exc(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'error.py'
+            path.write_text('raise ValueError("boom")\n')
+            for version in ((3, 11), (3, 14)):
+                with self.subTest(version=version), patch.object(sys, 'version_info', version), \
+                        patch('aiython.repl.AiythonConsole.interact'), \
+                        patch.object(sys, 'excepthook'):
+                    run_script(path, interactive=True)
+
+    def test_host_execution_error_without_script_frame_is_propagated(self):
+        source = ('from pathlib import Path\n'
+                  'from unittest.mock import patch\n'
+                  'from aiython import cli\n'
+                  'from aiython.models import ResolvedConfig\n'
+                  'config = ResolvedConfig(None, Path.cwd())\n'
+                  'code = compile("pass", "<entry>", "exec")\n'
+                  'def fail(*args):\n'
+                  '    raise ValueError("outside script")\n'
+                  'with patch.object(cli, "exec", fail, create=True), patch.object(cli.atexit, "register"):\n'
+                  '    try:\n'
+                  '        cli.run_script(Path("entry.py"), config=config, compiled_code=code, '
+                  'restore_state=False)\n'
+                  '    except ValueError as error:\n'
+                  '        assert str(error) == "outside script"\n'
+                  '    else:\n'
+                  '        raise AssertionError("host error was swallowed")\n')
+        result = subprocess.run([sys.executable, '-c', source], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_cli_without_arguments_opens_repl_on_terminal(self):
         class Terminal(io.StringIO):
             def isatty(self):

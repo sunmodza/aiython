@@ -119,6 +119,13 @@ class RuntimePreparationEdgeTests(unittest.TestCase):
             self.manager.compile_source(large, filename)
         self.assertTrue(large.startswith('x = 1'))
 
+    def test_bound_code_cache_can_be_bypassed_and_evicted(self):
+        source = compile('answer = 1', '<bound-code-cache>', 'exec')
+        self.manager._bind_compiled(source, '__aiython_runtime__', cache=False)
+        with patch.object(rt, '_PREPARED_LIMIT', 0):
+            self.manager._bind_compiled(source, '__aiython_runtime__')
+            self.assertFalse(self.manager._bound_codes)
+
     def test_dynamic_name_fallback_and_local_lookup(self):
         transformer = rt.DynamicNames(parse('x = 1', 'test.py'))
         node = ast.Name('x', ast.Load())
@@ -205,6 +212,51 @@ class RuntimeRecoveryEdgeTests(unittest.TestCase):
                 self.manager.recover('failure', error)
             self.assertTrue(error._aiython_location)
             self.assertIn(__file__, str(error))
+
+    def test_unscoped_checkpoint_and_python_try_handler(self):
+        node = self.unit.tree.body[0]
+        checkpoint = rt.install_checkpoint(self.manager, self.unit, node,
+                                           'unscoped', scoped_retries=False)
+        tree = ast.fix_missing_locations(ast.Module(body=[checkpoint], type_ignores=[]))
+        code = compile(tree, self.unit.filename, 'exec')
+        namespace = {self.unit.runtime_name: self.manager}
+        with patch.object(self.manager, 'recover', return_value=False) as recover:
+            exec(code, namespace)
+        self.assertEqual(recover.call_args.args[2], 1)
+
+        source = '''try:
+    answer = 1
+except ValueError:
+    answer = probe()
+else:
+    answer = probe()
+finally:
+    cleaned = True
+'''
+        filename = '<protected-try-handler>'
+        self.manager.units[filename] = parse(source, filename)
+
+        def probe():
+            return self.manager.caller_has_python_handler(inspect.currentframe())
+
+        namespace = {'probe': probe}
+        exec(compile(source, filename, 'exec'), namespace)
+        self.assertTrue(namespace['answer'])
+        self.assertTrue(namespace['cleaned'])
+
+    def test_recovery_without_profile_reraises_and_retained_scope_is_found(self):
+        from aiython.typed_runtime import Scope
+
+        runtime = rt.Runtime(ResolvedConfig(None, Path.cwd()))
+        error = ValueError('original')
+        with self.assertRaises(ValueError) as caught:
+            runtime.recover('missing', error)
+        self.assertIs(caught.exception, error)
+        frame = inspect.currentframe()
+        scope = Scope()
+        runtime.types._module_scopes[id(frame.f_globals)] = (frame.f_globals, scope)
+        self.assertIs(runtime.recovery_scope(frame), scope)
+        runtime.capabilities.close()
 
     def test_fallback_attempt_counter_and_origin_traceback(self):
         self.assertTrue(self.recover(ValueError('failed'), RecoveryDecision('retry'), attempt=None))

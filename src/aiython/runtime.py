@@ -772,7 +772,7 @@ class Runtime:
             if self.stats.enabled:
                 self.stats.prepare_seconds += perf_counter() - prepared
         # Large generated programs run normally without displacing the cache.
-        if len(source) <= 256 * 1024:
+        if len(source) <= 256 * 1024 and not self.bridge.uses_vm(code):
             with self._lock:
                 packet = pickle.dumps((unit,
                     {k: v for k, v in self.blocks.items() if v[0].filename == filename},
@@ -1061,8 +1061,8 @@ class Runtime:
         # keep theirs outside the metaclass's namespace.
         counts = None
         if attempt is None:
-            from .typed_runtime import SCOPE, Scope, frame_scope
-            scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
+            from .typed_runtime import Scope
+            scope = self.recovery_scope(frame)
             counts = (scope.recovery_counts if isinstance(scope, Scope) else
                       frame.f_locals.setdefault(checkpoint.unit.runtime_name + 'recovery_counts', {}))
             attempt = counts.get(key, 0) + 1
@@ -1111,10 +1111,18 @@ class Runtime:
         finally:
             del frame
 
+    def recovery_scope(self, frame):
+        from .typed_runtime import SCOPE, Scope, frame_scope
+        scope = frame_scope(frame) or frame.f_locals.get(SCOPE)
+        if not isinstance(scope, Scope):
+            retained = self.types._module_scopes.get(id(frame.f_globals))
+            if retained is not None and retained[0] is frame.f_globals:
+                scope = retained[1]
+        return scope
+
     def clear_recovery_count(self, key):
-        from .typed_runtime import SCOPE, frame_scope
         frame = inspect.currentframe().f_back
         try:
-            (frame_scope(frame) or frame.f_locals[SCOPE]).recovery_counts.pop(key, None)
+            self.recovery_scope(frame).recovery_counts.pop(key, None)
         finally:
             del frame

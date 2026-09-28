@@ -68,11 +68,13 @@ skip the regeneration command: its interpreter is maintained directly in
 `aiython.native_bridge.NativeTypeBridge.prepare_unit` is the normal compiler
 entry point called by `Runtime.compile_source`. It selects the exact CPython
 code object for ordinary source without imports, annotations, AI directives,
-blocks, or configured recovery. For annotated source and configured recovery,
-it delegates to Aiython's boundary compiler; that path checks yielded values
-and can resume failed statements. A bridge bound to a `Runtime` offers the
-same behavior through `compile_source`. This routing works on stock CPython
-and the four pinned patched interpreters.
+blocks, or configured recovery. On patched CPython, simple annotated module
+assignments use the VM store callback by default. When recovery is configured,
+that subset adds statement checkpoints so AI can resume after an error while
+the VM callback checks typed stores. Other annotated source and configured
+recovery use Aiython's boundary compiler; that path also checks yielded values.
+On stock CPython the boundary compiler handles typed source and recovery.
+A bridge bound to a `Runtime` offers the same routing through `compile_source`.
 
 The standalone experimental `NativeTypeBridge.compile_source` and `installed`
 API parses annotations, compiles the original source, and validates annotated

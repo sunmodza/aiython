@@ -20,6 +20,186 @@ from aiython import type_constraints as tc
 
 
 class ContractEdgeTests(unittest.TestCase):
+    def test_class_contracts_and_fixed_unpack_are_checked_without_execution(self):
+        int_contract = tc.compile_contract(int, {})
+        self.assertFalse(tc.Contract('class', 'missing', python_type=1)
+                         .accepts_class(int, {}))
+        self.assertFalse(tc.Contract('class', 'object', python_type=object)
+                         .accepts_class(1, {}))
+        variable = TypeVar('Variable')
+        bindings = {}
+        self.assertTrue(tc.Contract('typevar', 'Variable', (int_contract,),
+                                    python_type=variable).accepts_class(int, bindings))
+        self.assertIs(bindings[variable], int)
+        unbounded = TypeVar('Unbounded')
+        self.assertTrue(tc.Contract('typevar', 'Unbounded', python_type=unbounded)
+                        .accepts_class(str, bindings))
+        self.assertIs(bindings[unbounded], str)
+
+        class Private:
+            _secret: int
+
+        tc.compile_contract(Private, {'Private': Private}).validate(Private())
+        compiler = tc.Compiler({})
+        packed = compiler.node(ast.parse('Unpack[Packed]', mode='eval').body,
+                               {'Unpack': Unpack, 'Packed': (int_contract,)})
+        self.assertEqual(packed.kind, 'unpack_fixed')
+        starred = compiler.node(ast.Starred(ast.Name('Packed', ast.Load()), ast.Load()),
+                                {'Packed': (int_contract,)})
+        self.assertEqual(starred.kind, 'unpack_fixed')
+        with self.assertRaises(tc.UnsupportedType):
+            compiler.node(ast.Starred(ast.Name('NotPacked', ast.Load()), ast.Load()),
+                          {'NotPacked': int})
+        with self.assertRaises(tc.UnsupportedType):
+            compiler.generic(Unpack, (int_contract,), 'Unpack[int]', {})
+
+    def test_descriptor_and_annotation_introspection_edges(self):
+        self.assertEqual(tc.class_parameters(1), ())
+
+        def empty_annotator():
+            hidden = 1
+
+            def annotate(format):
+                return hidden
+
+            del hidden
+            return annotate
+
+        class Model:
+            @property
+            def field(self):
+                return 1
+
+        type.__setattr__(Model, '__annotate__', empty_annotator())
+        self.assertEqual(tc.annotation_locals(Model), {})
+        type.__setattr__(Model, '__annotate__', None)
+        self.assertEqual(tc.annotation_locals(Model), {})
+
+        def classdict_annotator():
+            __classdict__ = {'field': int}
+
+            def annotate(format):
+                return __classdict__
+
+            return annotate
+
+        type.__setattr__(Model, '__annotate__', classdict_annotator())
+        self.assertEqual(tc.annotation_locals(Model), {})
+        self.assertTrue(tc.descriptor_field(Model, 'field', property))
+        self.assertFalse(tc.descriptor_field(Model, 'field', int))
+        self.assertTrue(tc.descriptor_field(Model, 'field', "'property'"))
+        self.assertFalse(tc.descriptor_field(Model, 'field', "'"))
+        self.assertTrue(tc.descriptor_field(Model, 'field', 'builtins.property'))
+        self.assertFalse(tc.descriptor_field(Model, 'field', 'list[int]'))
+
+    def test_unsupported_container_shapes_fail_without_consuming_values(self):
+        namespace = {'typing': typing, 'ChainMap': ChainMap}
+        self.assertEqual(tc.compile_contract('typing.Collection[int]', namespace)
+                         .schema()['x-python-collection-items']['type'], 'integer')
+
+        class Collection(typing.Collection):
+            def __len__(self):
+                return 1
+
+            def __iter__(self):
+                yield 1
+
+            def __contains__(self, item):
+                return item == 1
+
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('typing.Collection[int]', namespace).validate(Collection())
+
+        class Mapping(typing.Mapping):
+            def __iter__(self):
+                return iter(('a',))
+
+            def __len__(self):
+                return 1
+
+            def __getitem__(self, key):
+                return 1
+
+        unsupported = Mapping()
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('typing.Mapping[str, int]', namespace).validate(unsupported)
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('ChainMap[str, int]', namespace).validate(ChainMap(unsupported))
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('typing.KeysView[str]', namespace).validate(unsupported.keys())
+
+        class Stream(io.IOBase):
+            pass
+
+        with self.assertRaises(tc.TypeViolation):
+            tc.compile_contract('typing.IO[str]', namespace).validate(Stream())
+        tc.compile_contract('typing.IO[Any]', namespace | {'Any': Any}).validate(Stream())
+
+    def test_contract_compiler_rejects_invalid_type_parameters(self):
+        compiler = tc.Compiler({})
+        int_contract = tc.compile_contract(int, {})
+        fixed = tc.Contract('unpack_fixed', '*Packed', (int_contract,))
+        self.assertIs(compiler.generic(Unpack, (fixed,), 'Unpack[Packed]', {}), fixed)
+        self.assertEqual(compiler.generic(tuple, (fixed,), 'tuple[*Packed]', {})
+                         .args, (int_contract,))
+        tuple_parameter = TypeVarTuple('TupleParameters')
+        self.assertEqual(compiler.compile(tuple_parameter,
+                                          {tuple_parameter: (int_contract,)}).kind,
+                         'unpack_fixed')
+        with self.assertRaises(tc.UnsupportedType):
+            tc.compile_contract('typing.Callable[int]', {'typing': typing})
+        with self.assertRaises(tc.UnsupportedType):
+            tc.compile_contract('typing.TypeGuard[int, str]', {'typing': typing})
+        invalid_generics = (
+            (typing.Unpack, (int_contract, int_contract), 'Unpack'),
+            (typing.IO, (), 'IO'),
+            (re.Pattern, (int_contract, int_contract), 'Pattern'),
+            (typing.Hashable, (int_contract,), 'Hashable'),
+            (tc.dataclasses.InitVar, (int_contract, int_contract), 'InitVar'),
+            (tuple, (tc.Contract('unpack_any', '*A'),
+                     tc.Contract('unpack_any', '*B')), 'tuple'),
+        )
+        for base, args, label in invalid_generics:
+            with self.subTest(label=label):
+                with self.assertRaises(tc.UnsupportedType):
+                    compiler.generic(base, args, label, {})
+        self.assertEqual(compiler.generic(typing.Callable, (), 'Callable', {}).kind,
+                         'callable')
+        self.assertEqual(tc.compile_contract(tc.dataclasses.KW_ONLY, {}).kind, 'kw_only')
+        with self.assertRaises(tc.UnsupportedType):
+            tc.compile_contract(tc.dataclasses.KW_ONLY, {}).validate(1)
+
+        first = TypeVarTuple('First')
+        second = TypeVarTuple('Second')
+        with self.assertRaises(tc.UnsupportedType):
+            compiler.parameter_bindings((first, second), (), {}, 'wrong count')
+        required = SimpleNamespace(__name__='Required', __default__=getattr(typing, 'NoDefault', None))
+        optional = SimpleNamespace(__name__='Optional', __default__=int)
+        self.assertEqual(compiler.parameter_bindings((first, optional), (), {}, 'wrong count')
+                         ['Optional'].kind, 'int')
+        self.assertEqual(compiler.parameter_bindings((optional,), (), {}, 'wrong count')
+                         ['Optional'].kind, 'int')
+        with self.assertRaises(tc.UnsupportedType):
+            compiler.parameter_bindings((first, required), (), {}, 'wrong count')
+        with self.assertRaises(tc.UnsupportedType):
+            compiler.parameter_bindings((first, optional, required), (int_contract,),
+                                        {}, 'wrong count')
+        with self.assertRaises(tc.UnsupportedType):
+            compiler.parameter_bindings((required,), (int_contract, int_contract),
+                                        {}, 'wrong count')
+
+    def test_variadic_generic_parent_keeps_expanded_arguments(self):
+        parameters = TypeVarTuple('Parameters')
+
+        class Base(Generic[*parameters]):
+            pass
+
+        class Child(Base[int, str]):
+            pass
+
+        contract = tc.Compiler({}).class_contract(Child, {})
+        self.assertEqual(contract.kind, 'class')
+
     def test_self_field_uses_class_being_validated(self):
         class Node:
             next: Self | None
