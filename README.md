@@ -15,6 +15,7 @@
 <p align="center">
   <a href="docs/index.md">Documentation</a> ·
   <a href="examples/recipes/README.md">Examples</a> ·
+  <a href="https://youtu.be/CMTDqCJqunc">30-second concept video</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
