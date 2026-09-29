@@ -1,10 +1,10 @@
 # Aiython
 
-**When Python doesn’t know what to do, Aiython does.**
+**Put AI at the exact line where your Python program needs it.**
 
 Aiython runs Python normally and brings in AI when Python cannot parse the source or continue execution. AI works with the live program state; Python keeps control of execution.
 
-[Get started](getting-started.md) · [Browse examples](examples.md)
+[Get started](getting-started.md) · [Browse examples](examples.md) · [Watch the 30-second concept video](https://youtu.be/CMTDqCJqunc)
 
 ![Animated walkthrough of two tickets being classified in a Python loop and summarized after the loop.](assets/runtime-debug.gif)
 
