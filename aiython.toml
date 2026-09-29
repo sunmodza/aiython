@@ -1,6 +1,5 @@
 version = 3
 model = "openrouter/openai/gpt-6-luna"
-env_file = ".aiython/credentials.env"
 api_key_env = "OPENROUTER_API_KEY"
 
 # Optional capability routes:

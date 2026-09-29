@@ -5,11 +5,11 @@
 <h1 align="center">Aiython</h1>
 
 <p align="center">
-  <strong>When Python doesn’t know what to do, Aiython does.</strong>
+  <strong>Put AI at the exact line where your Python program needs it.</strong>
 </p>
 
 <p align="center">
-  Run ordinary Python with inline AI instructions and AI-assisted recovery.
+  Keep Python in control of the loop. Use typed, inline AI requests where you need judgment.
 </p>
 
 <p align="center">
@@ -25,28 +25,40 @@
   >
 </p>
 
-Aiython runs Python normally. When Python cannot parse an inline instruction
-or cannot continue through an eligible error, Aiython can hand that part to AI
-using the live program state, validate the result, and let Python continue.
+Aiython runs ordinary Python. At an inline instruction or eligible runtime
+error, it can ask a configured model using live program state, check the
+result, and resume execution.
 
 ```python
 kind: Literal["bug", "billing"] = classify this ticket
 ```
 
-That is not normal Python syntax. With Aiython, it can become part of a running
-Python program.
+That is not valid Python syntax on its own. Aiython resolves it at runtime;
+Python still controls the loop and uses the checked `Literal` value.
 
 ## Quick start
 
+Use Python 3.11 or newer. To inspect the included example **without an API key
+or a model call**, clone the repo and run:
+
+```bash
+git clone https://github.com/sunmodza/aiython.git
+cd aiython
+uv run --locked aiython --explain examples/recipes/03_loop.py
+```
+
+`--explain` shows the detected AI instructions and recovery checkpoints. It
+does not run the script. For an actual model-backed run:
+
 ### 1. Install
 
-With `uv`:
+For a standalone command with `uv`:
 
 ```bash
 uv tool install aiython
 ```
 
-Or with `pip`:
+Or in your project's Python environment:
 
 ```bash
 pip install aiython
@@ -58,11 +70,16 @@ pip install aiython
 aiython setup
 ```
 
+Choose a tool-calling model. Calls can incur provider charges; review the
+[permissions and data exposure](#security) before running unfamiliar scripts.
+
 ### 3. Run your Python script with Aiython
 
 ```bash
 aiython app.py
 ```
+
+You can inspect your own script first with `aiython --explain app.py`.
 
 Modules work the same way:
 

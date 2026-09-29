@@ -36,6 +36,13 @@ reranking = { model = "cohere/rerank", api_key_env = "COHERE_KEY" }
         self.assertEqual(config.profiles['fast'].routes['reranking'][0]['model'], 'cohere/rerank')
         self.assertNotIn('secret', str(describe(config)))
 
+    def test_checked_in_config_loads_in_a_clean_checkout(self):
+        source = Path(__file__).resolve().parents[1] / "aiython.toml"
+        self.path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        selected = resolve(self.root / "examples" / "recipes" / "03_loop.py")
+        self.assertEqual(selected.path, self.path)
+        self.assertEqual(selected.profiles["default"].model, "openrouter/openai/gpt-6-luna")
+
     def test_project_scoped_credentials_and_process_override(self):
         self.path.write_text('version=3\nmodel="openai/test"\nenv_file=".aiython/credentials.env"\napi_key_env="TEST_AI_KEY"\n')
         (self.root / '.aiython').mkdir()
